@@ -657,17 +657,35 @@ public class BaseIconFactory implements AutoCloseable {
             return;
         }
 
-        // Step 8: HSL-based color mixing — ported verbatim from AdaptiveIconGenerator.
+        // Step 8: HSL-based color mixing — ported from AdaptiveIconGenerator with one fix.
         final int numColors       = rgbScoreHistogram.size();
         final boolean singleColor = numColors <= SINGLE_COLOR_LIMIT;
 
         final float[] hsl = new float[3];
         ColorUtils.colorToHSL(bestRGB, hsl);
-        final float lightness = hsl[2];
+        final float lightness  = hsl[2];
+        final float saturation = hsl[1];
 
-        final boolean light     = lightness > 0.5f;
-        final boolean veryLight = lightness > 0.75f && singleColor; // mostly white → dark bg
-        final boolean veryDark  = lightness < 0.35f && singleColor; // mostly dark  → light bg
+        final boolean light = lightness > 0.5f;
+
+        // Blend toward dark background for mostly-white single-color icons.
+        final boolean veryLight = lightness > 0.75f && singleColor;
+
+        // Blend toward white background for dark-dominant icons.
+        //
+        // CHANGE from the original AdaptiveIconGenerator:
+        // The original required (singleColor) as well as (lightness < 0.35), meaning icons
+        // with dark content spread across many posterized color buckets — like FDM's dark-navy
+        // logo with rounded corners and subtle shading — were not classified as veryDark.
+        // They fell into the "fill = 0xFF333333" branch and got blended toward near-black,
+        // producing a deep-blue or charcoal background that was visually wrong.
+        //
+        // New rule: any icon whose dominant color has lightness < 0.35 is treated as veryDark
+        // regardless of color count, because blending a dark color further toward 0xFF333333
+        // always makes it darker and never improves it. We add a secondary catch for
+        // desaturated mid-tones (dark grays): lightness < 0.50 AND saturation < 0.15.
+        final boolean veryDark = (lightness < 0.35f)
+                || (lightness < 0.50f && saturation < 0.15f);
 
         final int opaqueSize   = totalPixels - transparentScore;
         final float pxPerColor = opaqueSize / (float) numColors;

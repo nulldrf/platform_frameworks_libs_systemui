@@ -395,7 +395,20 @@ public class CustomAdaptiveIconDrawable extends AdaptiveIconDrawable implements 
         }
         if (mLayersShader == null) {
             mCanvas.setBitmap(mLayersBitmap);
-            mCanvas.drawColor(Color.BLACK);
+
+            // Fill with TRANSPARENT instead of BLACK.
+            //
+            // The adaptive icon spec reserves an extra 18dp inset on each side (the
+            // "extra inset" zone) for parallax/animation effects. Child layers are only
+            // sized to the inner 72dp viewport. When the user chooses an icon shape whose
+            // mask extends into that extra-inset zone (e.g. the pointed corner of a
+            // teardrop), the BitmapShader samples pixels from the region where no child
+            // layer has drawn anything. Filling with BLACK made those sampled pixels black,
+            // producing a clearly visible black corner artifact. Filling with TRANSPARENT
+            // (0x00000000) lets those pixels remain transparent so the launcher's
+            // background surface shows through cleanly instead.
+            mCanvas.drawColor(Color.TRANSPARENT);
+
             if (mLayerState.mChildren[BACKGROUND_ID].mDrawable != null) {
                 mLayerState.mChildren[BACKGROUND_ID].mDrawable.draw(mCanvas);
             }
