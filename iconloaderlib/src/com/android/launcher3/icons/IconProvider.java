@@ -59,6 +59,7 @@ import java.util.Calendar;
 import java.util.Objects;
 
 import app.lawnchair.icons.CustomAdaptiveIconDrawable;
+import app.lawnchair.icons.IconPreferencesKt;
 
 /**
  * Class to handle icon loading from different packages
@@ -253,7 +254,7 @@ public class IconProvider {
     public Drawable getFullResDefaultActivityIcon(final int iconDpi) {
         Drawable icon = Objects.requireNonNull(Resources.getSystem().getDrawableForDensity(
             android.R.drawable.sym_def_app_icon, iconDpi));
-        
+
         return CustomAdaptiveIconDrawable.wrapNonNull(icon);
     }
 
@@ -282,13 +283,37 @@ public class IconProvider {
     }
 
     /**
-     * Refreshes the system state definition used to check the validity of an app icon. It
-     * incorporates all the properties that can affect the app icon like the list of enabled locale
-     * and system-version.
+     * Refreshes the system state definition used to check the validity of an app icon.
+     *
+     * This string is stored as the "freshness identifier" in the icon disk cache (SQLite).
+     * When the string changes, the cache entry is considered stale and the icon is regenerated
+     * from scratch by BaseIconFactory.
+     *
+     * We include the Lawnchair adaptive icon pref values here so that toggling
+     * "Smart icon backgrounds" or "Recolor white adaptive backgrounds" immediately
+     * invalidates ALL existing disk-cached icon bitmaps, forcing them to be rebuilt
+     * with the new processing logic on the next model reload.
+     *
+     * Without this, clearMemoryCache() + reloadIfActive() would re-read the old bitmaps
+     * from disk and display them unchanged even after the pref was toggled.
      */
     public void updateSystemState() {
-        mSystemState = mContext.getResources().getConfiguration().getLocales().toLanguageTags()
+        // Base state: locale tags + SDK version (upstream behavior)
+        String baseState = mContext.getResources().getConfiguration().getLocales().toLanguageTags()
                 + "," + Build.VERSION.SDK_INT;
+
+        // Append adaptive icon pref values so any change invalidates the disk cache.
+        // We use a compact encoding: "w" = wrapAdaptive, "c" = colorize, "t" = treatWhite.
+        // Each is 1 (enabled) or 0 (disabled). Example: "w1c1t0"
+        boolean wrapAdaptive    = IconPreferencesKt.shouldWrapAdaptive(mContext);
+        boolean colorize        = IconPreferencesKt.shouldColorizeBackground(mContext);
+        boolean treatWhite      = IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
+
+        mSystemState = baseState
+                + SYSTEM_STATE_SEPARATOR
+                + "w" + (wrapAdaptive ? "1" : "0")
+                + "c" + (colorize    ? "1" : "0")
+                + "t" + (treatWhite  ? "1" : "0");
     }
 
     /**

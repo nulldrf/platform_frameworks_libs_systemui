@@ -80,25 +80,34 @@ public class BaseIconFactory implements AutoCloseable {
     private static final float ICON_BADGE_SCALE = 0.444f;
 
     // -----------------------------------------------------------------------
-    // AdaptiveIconGenerator constants — ported from old Lawnchair 2019 code
+    // AdaptiveIconGenerator constants
     // -----------------------------------------------------------------------
 
-    // Average number of derived colors (based on averages with ~100 icons and performance testing)
     private static final int NUMBER_OF_COLORS_GUESSTIMATION = 45;
 
-    // Scale applied when an icon is detected as full-bleed (fills its entire bounds, no padding)
+    // Scale applied when an icon fills its entire bounds with no transparent padding.
     private static final float FULL_BLEED_ICON_SCALE = 1.44f;
 
-    // Scale applied when an icon is squarish and opaque enough that no color mix-in is needed
+    // Scale applied when an icon is squarish and opaque enough to skip color mixing.
     private static final float NO_MIXIN_ICON_SCALE = 1.40f;
 
-    // Icons with this many unique posterized colors or fewer are treated as "single color"
+    // Icons with this many unique posterized colors or fewer are treated as "single color".
     private static final int SINGLE_COLOR_LIMIT = 5;
 
-    // Alpha threshold: pixels at or above this value are considered fully opaque for analysis.
-    // Using 0xEF (239) matches the original AdaptiveIconGenerator behavior exactly, which is
-    // stricter than IconNormalizer's threshold of 40 — intentional.
+    // Pixels at or above this alpha are considered fully opaque for analysis purposes.
+    // Intentionally stricter than IconNormalizer's threshold (40) to match the original
+    // AdaptiveIconGenerator behavior precisely.
     private static final int ADAPTIVE_MIN_VISIBLE_ALPHA = 0xEF;
+
+    // If more than this fraction of pixels are transparent, the icon is foreground art on
+    // a transparent canvas — it has no natural background color. In that case we skip color
+    // blending and use plain white instead.
+    //
+    // Without this guard, the dominant color extracted from thin colored strokes (e.g. the
+    // blue robot body in Apktool M, or the colored shapes in transparent Google app icons)
+    // gets blended toward 0xFF333333 because its lightness is < 0.5, producing a
+    // deep-blue or near-black background that looks obviously wrong.
+    private static final float TRANSPARENT_BACKGROUND_THRESHOLD = 0.50f;
 
     // -----------------------------------------------------------------------
 
@@ -388,37 +397,29 @@ public class BaseIconFactory implements AutoCloseable {
 
     /**
      * Reduces color complexity by grouping nearby RGB values together (posterization).
-     * Ported verbatim from the old Lawnchair ColorExtractor.posterize().
      *
-     * The old code packed r/g/b into a 24-bit int with 4 bits per channel (16 buckets per
-     * channel), which produced stable histogram keys even for slight color variations.
-     *
-     * Returns a non-negative int suitable as a histogram key, or -1 on underflow guard.
+     * Quantizes each R/G/B channel to 4 bits (16 buckets per channel, step of 16), then
+     * packs them into a single int used as a histogram key. Nearby colors map to the same
+     * bucket so one truly dominant color wins cleanly even in photos with slight gradients.
+     * Returns -1 as a defensive guard for underflow.
      */
     private static int posterizeColor(int pixel) {
-        // Extract 8-bit channels (no alpha)
-        int r = (pixel >> 16) & 0xFF;
-        int g = (pixel >> 8) & 0xFF;
-        int b = pixel & 0xFF;
-        // Quantize each channel to 4 bits (0-15 range, step of 16)
-        r = r >> 4;
-        g = g >> 4;
-        b = b >> 4;
-        // Pack back into a single int using the same layout the old code expected.
-        // This matches the old ColorExtractor.posterize() output for histogram keying.
+        int r = ((pixel >> 16) & 0xFF) >> 4;
+        int g = ((pixel >> 8)  & 0xFF) >> 4;
+        int b = (pixel         & 0xFF) >> 4;
         int result = (r << 8) | (g << 4) | b;
-        if (result < 0) {
-            return -1;
-        }
-        return result;
+        return result < 0 ? -1 : result;
     }
 
     /**
-     * Returns true if the given drawable consists entirely (or almost entirely) of a single
-     * opaque color. Used to detect whether a background layer is plain white before deciding
-     * whether to recolor an adaptive icon.
+     * Returns true if the given drawable is entirely (or almost entirely) a single opaque color.
      *
-     * Ported from old Lawnchair ColorExtractor.isSingleColor().
+     * Used to detect whether an adaptive icon's background is plain white before deciding
+     * whether to recolor it. For ColorDrawable inputs this is a direct integer comparison.
+     * For other drawables we rasterize to a 64x64 thumbnail and scan every opaque pixel.
+     *
+     * BOUNDS CONTRACT: this method saves and restores the drawable's bounds so that the
+     * rasterization pass does not corrupt the caller's subsequent draw calls.
      */
     private static boolean isSingleColor(@Nullable Drawable drawable, int color) {
         if (drawable == null) {
@@ -427,25 +428,28 @@ public class BaseIconFactory implements AutoCloseable {
         if (drawable instanceof ColorDrawable) {
             return ((ColorDrawable) drawable).getColor() == color;
         }
-        // For more complex drawables, rasterize and sample
-        int width = Math.max(drawable.getIntrinsicWidth(), 1);
-        int height = Math.max(drawable.getIntrinsicHeight(), 1);
-        // Cap to a small size for performance — we only need to know if it's a solid color
-        width = Math.min(width, 64);
-        height = Math.min(height, 64);
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+
+        // Save bounds before touching them — see the bounds-restoration note in analyzeIconPixels.
+        final Rect savedBounds = new Rect(drawable.getBounds());
+
+        final int sampleSize = 64;
+        Bitmap bitmap = Bitmap.createBitmap(sampleSize, sampleSize, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
-        drawable.setBounds(0, 0, width, height);
+        drawable.setBounds(0, 0, sampleSize, sampleSize);
         drawable.draw(canvas);
-        int[] pixels = new int[width * height];
-        bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
+
+        // Restore immediately — before any return path below.
+        drawable.setBounds(savedBounds);
+
+        int[] pixels = new int[sampleSize * sampleSize];
+        bitmap.getPixels(pixels, 0, sampleSize, 0, 0, sampleSize, sampleSize);
         bitmap.recycle();
+
         for (int pixel : pixels) {
             int alpha = (pixel >> 24) & 0xFF;
             if (alpha < ADAPTIVE_MIN_VISIBLE_ALPHA) {
                 continue;
             }
-            // Compare RGB only (ignore alpha channel for the color comparison)
             if ((pixel & 0x00FFFFFF) != (color & 0x00FFFFFF)) {
                 return false;
             }
@@ -454,58 +458,72 @@ public class BaseIconFactory implements AutoCloseable {
     }
 
     /**
-     * Core pixel-level analysis that replicates the old AdaptiveIconGenerator.loop() logic.
+     * Core pixel-level analysis replicating the old AdaptiveIconGenerator.loop() logic.
      *
-     * This method rasterizes the given drawable at mIconBitmapSize, then:
-     *   1. Counts transparent pixels to classify the icon as full-bleed or not.
-     *   2. Checks whether the icon is squarish (aspect ratio close to 1:1) using the
-     *      normalizer-computed bounding rect.
-     *   3. Builds a posterized RGB histogram to find the dominant color.
-     *   4. Applies HSL-based blending to produce a readable, contrast-appropriate background.
+     * Steps:
+     *   1. Rasterize the drawable to a bitmap using its intrinsic size.
+     *   2. Walk pixels to find the visible bounding box and check squarishness.
+     *   3. Compute padding-corrected transparency thresholds (10% = full-bleed,
+     *      27% = no-mixin) matching the original AdaptiveIconGenerator constants.
+     *   4. If the icon is mostly transparent (> TRANSPARENT_BACKGROUND_THRESHOLD),
+     *      it has no natural background — use white directly and skip color blending.
+     *      This prevents the deep-blue result that occurs when thin colored strokes
+     *      are posterized and blended toward 0xFF333333.
+     *   5. Build a posterized RGB histogram in the same pass to find dominant color.
+     *   6. Apply HSL-based blending for icons that need a colored background.
      *
-     * Results are written into the provided {@link AdaptiveIconAnalysis} output object.
+     * BOUNDS CONTRACT: this method saves and restores the drawable's bounds around
+     * the rasterization call. Without this, the drawable's bounds are left at the
+     * analysis raster dimensions, causing drawIconBitmap() to use the wrong size.
+     * On Android 11 this caused all wrapped icons to appear pixelated because
+     * FixedScaleDrawable's foreground was drawn at the analysis resolution instead
+     * of the correct icon bitmap size.
      *
-     * @param extractee  The drawable to analyze. Should be the raw legacy icon (not yet wrapped),
-     *                   or the foreground layer of an adaptive icon.
-     * @param out        Output object that receives isFullBleed, noMixinNeeded,
-     *                   backgroundColor, and the normalizer scale.
-     * @param extractColor  Whether to run color extraction at all. If false, backgroundColor
-     *                      will be set to DEFAULT_WRAPPER_BACKGROUND (white).
+     * @param extractee    Raw legacy icon or adaptive foreground layer to analyze.
+     * @param out          Receives isFullBleed, noMixinNeeded, backgroundColor,
+     *                     normalizerScale, and visible dimensions.
+     * @param extractColor If false, skip HSL blending and use white (unless full-bleed
+     *                     or no-mixin, where bestRGB is always used regardless).
      */
     private void analyzeIconPixels(
             @NonNull Drawable extractee,
             @NonNull AdaptiveIconAnalysis out,
             boolean extractColor) {
 
-        // Step 1: measure bounds via IconNormalizer so we know visible area dimensions.
-        // We use IconNormalizer only to get the scale; we then derive approximate bounds from it.
-        // The old code used a 5-arg getScale() with a RectF out-param that no longer exists
-        // in the new IconNormalizer. We replicate the bounds by rasterizing directly.
-        final int size = mIconBitmapSize;
-        final float normScale = new IconNormalizer(size).getScale(extractee);
-        out.normalizerScale = normScale;
+        // Step 0: normalizer scale (used by caller for the default scale path).
+        out.normalizerScale = new IconNormalizer(mIconBitmapSize).getScale(extractee);
 
-        // Rasterize the extractee at icon bitmap size to count pixels
+        // Step 1: determine raster dimensions.
         final int width;
         final int height;
         int intrinsicW = extractee.getIntrinsicWidth();
         int intrinsicH = extractee.getIntrinsicHeight();
         if (intrinsicW > 0 && intrinsicH > 0) {
-            width = intrinsicW;
+            width  = intrinsicW;
             height = intrinsicH;
         } else {
-            width = size;
-            height = size;
+            width  = mIconBitmapSize;
+            height = mIconBitmapSize;
         }
+
+        // Save bounds BEFORE modifying them.
+        // setBounds() mutates shared drawable state. If we don't restore here, then when
+        // drawIconBitmap() later calls mOldBounds.set(icon.getBounds()) it captures the
+        // analysis raster size rather than the unset/pre-existing bounds. The FixedScaleDrawable
+        // foreground layer then draws at the wrong intrinsic size reference — on Android 11
+        // this manifested as pixelation across all icons regardless of shape.
+        final Rect savedBounds = new Rect(extractee.getBounds());
 
         Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
         extractee.setBounds(0, 0, width, height);
         extractee.draw(canvas);
 
+        // Restore bounds immediately, before any early return below.
+        extractee.setBounds(savedBounds);
+
         if (!bitmap.hasAlpha()) {
-            // No alpha channel at all — definitely full bleed
-            out.isFullBleed = true;
+            out.isFullBleed      = true;
             out.fullBleedChecked = true;
         }
 
@@ -514,69 +532,61 @@ public class BaseIconFactory implements AutoCloseable {
         bitmap.getPixels(pixels, 0, width, 0, 0, width, height);
         bitmap.recycle();
 
-        // Compute the visible bounding box so we can check squarishness and measure
-        // the amount of "real" padding (transparent margin) around the icon.
+        // Step 2: visible bounding box.
         int bLeft = width, bRight = -1, bTop = height, bBottom = -1;
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
-                int pixel = pixels[y * width + x];
-                int alpha = (pixel >> 24) & 0xFF;
+                int alpha = (pixels[y * width + x] >> 24) & 0xFF;
                 if (alpha >= ADAPTIVE_MIN_VISIBLE_ALPHA) {
-                    if (x < bLeft) bLeft = x;
-                    if (x > bRight) bRight = x;
-                    if (y < bTop) bTop = y;
+                    if (x < bLeft)   bLeft   = x;
+                    if (x > bRight)  bRight  = x;
+                    if (y < bTop)    bTop    = y;
                     if (y > bBottom) bBottom = y;
                 }
             }
         }
 
-        // If nothing visible was found at all, bail out with white background
         if (bRight < 0 || bBottom < 0) {
+            // Entirely transparent — white background, nothing else to do.
             out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
             return;
         }
 
-        // aWidth / aHeight = visible (non-padded) dimensions
-        final float aWidth = (bRight - bLeft + 1);
-        final float aHeight = (bBottom - bTop + 1);
+        final float aWidth  = bRight  - bLeft   + 1;
+        final float aHeight = bBottom - bTop    + 1;
 
-        // Squarishness check — matching old logic exactly
-        final float ratio = aHeight / aWidth;
-        final boolean isSquareish = ratio > 0.999f && ratio < 1.0001f;
+        // Squarishness check — matches old AdaptiveIconGenerator exactly.
+        final float ratio            = aHeight / aWidth;
+        final boolean isSquareish    = ratio > 0.999f && ratio < 1.0001f;
         final boolean almostSquarish = isSquareish || (ratio > 0.97f && ratio < 1.005f);
+
         if (!isSquareish && !out.fullBleedChecked) {
-            out.isFullBleed = false;
+            out.isFullBleed      = false;
             out.fullBleedChecked = true;
         }
 
-        // Compute padding pixel counts to correct the transparency threshold.
-        // This mirrors the "addPixels" calculation in the old loop():
-        //   l  = bounds.left  * width  * adjHeight
-        //   top = bounds.top  * height * width
-        //   r  = bounds.right * width  * adjHeight
-        //   bottom = bounds.bottom * height * width
-        // We derive fractional bounds from the pixel-level bounding box.
-        final float fracLeft   = (float) bLeft   / width;
-        final float fracTop    = (float) bTop    / height;
+        // Step 3: padding-corrected transparency thresholds.
+        // Fractional bounds derived from the pixel bounding box, matching the original
+        // AdaptiveIconGenerator "addPixels" calculation (bounds.left/top/right/bottom).
+        final float fracLeft   = (float) bLeft                  / width;
+        final float fracTop    = (float) bTop                   / height;
         final float fracRight  = (float) (width  - 1 - bRight)  / width;
         final float fracBottom = (float) (height - 1 - bBottom) / height;
         final float adjHeight  = height * (1f - fracTop - fracBottom);
         final float paddingPixels =
-                fracLeft   * width * adjHeight
+                fracLeft   * width  * adjHeight
               + fracTop    * height * width
-              + fracRight  * width * adjHeight
+              + fracRight  * width  * adjHeight
               + fracBottom * height * width;
         final int addPixels = Math.round(paddingPixels);
 
-        // Any icon with less than 10% transparent pixels (excluding padding) = full bleed
         final int maxTransparent = (int) (Math.round(totalPixels * 0.10f) + addPixels);
-        // Any icon with less than 27% transparent pixels doesn't need a color mix-in
-        final int noMixinScore  = (int) (Math.round(totalPixels * 0.27f) + addPixels);
+        final int noMixinScore   = (int) (Math.round(totalPixels * 0.27f) + addPixels);
 
-        // Step 2: single-pass pixel scan — count transparency, build color histogram
+        // Step 4: single-pass scan — transparency count + RGB histogram.
         SparseIntArray rgbScoreHistogram = new SparseIntArray(NUMBER_OF_COLORS_GUESSTIMATION);
-        int highScore = 0;
-        int bestRGB = 0;
+        int highScore        = 0;
+        int bestRGB          = 0;
         int transparentScore = 0;
 
         for (int pixel : pixels) {
@@ -584,16 +594,14 @@ public class BaseIconFactory implements AutoCloseable {
             if (alpha < ADAPTIVE_MIN_VISIBLE_ALPHA) {
                 transparentScore++;
                 if (transparentScore > maxTransparent && !out.fullBleedChecked) {
-                    out.isFullBleed = false;
+                    out.isFullBleed      = false;
                     out.fullBleedChecked = true;
                     if (!extractColor) {
-                        // No need to keep scanning for color
                         break;
                     }
                 }
                 continue;
             }
-            // Reduce color complexity via posterization
             int rgb = posterizeColor(pixel & 0x00FFFFFF);
             if (rgb < 0) {
                 continue;
@@ -602,44 +610,55 @@ public class BaseIconFactory implements AutoCloseable {
             rgbScoreHistogram.append(rgb, currentScore);
             if (currentScore > highScore) {
                 highScore = currentScore;
-                bestRGB = rgb;
+                bestRGB   = rgb;
             }
         }
 
-        // Restore full alpha channel on the best color
+        // Restore full alpha on the winning color.
         bestRGB |= 0xFF << 24;
 
-        // If fullBleed was never definitively set to false, and this is not a known adaptive
-        // icon (isBackgroundWhite would be true in the adaptive path), then it is full bleed.
-        // Here we are always called with non-adaptive icons, so:
-        //   not yet checked = not set to false = must be full bleed
+        // If fullBleed was never definitively set to false, the icon must be full bleed.
         if (!out.fullBleedChecked) {
             out.isFullBleed = true;
         }
 
-        // Step 3: no-mixin shortcut — squarish + mostly opaque means we can skip blending
+        // Step 5: transparent-background guard.
+        // If the majority of pixels are transparent, the icon is foreground art on a
+        // transparent canvas — extracting a background color from the art itself and then
+        // blending it toward near-black produces wrong results (deep blue on Apktool M,
+        // dark tints on many Google app icons, etc.). Use white unconditionally here.
+        final float transparentFraction = (float) transparentScore / totalPixels;
+        if (transparentFraction > TRANSPARENT_BACKGROUND_THRESHOLD) {
+            out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
+            out.aWidth     = aWidth;
+            out.aHeight    = aHeight;
+            out.iconWidth  = width;
+            out.iconHeight = height;
+            return;
+        }
+
+        // Step 6: no-mixin shortcut.
         out.noMixinNeeded = !out.isFullBleed
                 && almostSquarish
                 && (transparentScore <= noMixinScore);
 
         if (out.isFullBleed || out.noMixinNeeded) {
             out.backgroundColor = bestRGB;
-            // Store visible dimensions so the caller can compute scale upfactors
-            out.aWidth  = aWidth;
-            out.aHeight = aHeight;
+            out.aWidth     = aWidth;
+            out.aHeight    = aHeight;
             out.iconWidth  = width;
             out.iconHeight = height;
             return;
         }
 
-        // Step 4: if we are not extracting color, use plain white
+        // Step 7: plain white if color extraction is disabled.
         if (!extractColor) {
             out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
             return;
         }
 
-        // Step 5: HSL-based color mixing — replicates old AdaptiveIconGenerator exactly
-        final int numColors = rgbScoreHistogram.size();
+        // Step 8: HSL-based color mixing — ported verbatim from AdaptiveIconGenerator.
+        final int numColors       = rgbScoreHistogram.size();
         final boolean singleColor = numColors <= SINGLE_COLOR_LIMIT;
 
         final float[] hsl = new float[3];
@@ -650,33 +669,32 @@ public class BaseIconFactory implements AutoCloseable {
         final boolean veryLight = lightness > 0.75f && singleColor; // mostly white → dark bg
         final boolean veryDark  = lightness < 0.35f && singleColor; // mostly dark  → light bg
 
-        final int opaqueSize = totalPixels - transparentScore;
+        final int opaqueSize   = totalPixels - transparentScore;
         final float pxPerColor = opaqueSize / (float) numColors;
-        // mixRatio in [0.15, 0.70] — higher ratio = more fill color blended in
+        // mixRatio in [0.15, 0.70]: higher ratio = more fill color blended in.
         float mixRatio = Math.min(Math.max(pxPerColor / highScore, 0.15f), 0.70f);
 
-        // Choose fill direction: blend toward white for dark icons, dark for light icons
         int fill = ((light && !veryLight) || veryDark) ? 0xFFFFFFFF : 0xFF333333;
         out.backgroundColor = ColorUtils.blendARGB(bestRGB, fill, mixRatio);
 
-        out.aWidth  = aWidth;
-        out.aHeight = aHeight;
+        out.aWidth     = aWidth;
+        out.aHeight    = aHeight;
         out.iconWidth  = width;
         out.iconHeight = height;
     }
 
     /**
-     * Simple value object used to pass analysis results out of {@link #analyzeIconPixels}.
+     * Value object carrying the results of {@link #analyzeIconPixels}.
      */
     private static class AdaptiveIconAnalysis {
-        boolean isFullBleed       = false;
-        boolean fullBleedChecked  = false;
-        boolean noMixinNeeded     = false;
-        int     backgroundColor   = DEFAULT_WRAPPER_BACKGROUND;
-        float   normalizerScale   = 1f;
-        // Visible (non-padded) dimensions — populated when isFullBleed or noMixinNeeded is true
-        float   aWidth  = 0f;
-        float   aHeight = 0f;
+        boolean isFullBleed      = false;
+        boolean fullBleedChecked = false;
+        boolean noMixinNeeded    = false;
+        int     backgroundColor  = DEFAULT_WRAPPER_BACKGROUND;
+        float   normalizerScale  = 1f;
+        // Visible (non-padded) dimensions — used to compute per-type upscale factors.
+        float   aWidth     = 0f;
+        float   aHeight    = 0f;
         int     iconWidth  = 0;
         int     iconHeight = 0;
     }
@@ -690,17 +708,12 @@ public class BaseIconFactory implements AutoCloseable {
             return null;
         }
 
-        boolean isFromIconPack = ExtendedBitmapDrawable.isFromIconPack(icon);
+        boolean isFromIconPack     = ExtendedBitmapDrawable.isFromIconPack(icon);
         boolean shouldWrapAdaptive = !isFromIconPack && IconPreferencesKt.shouldWrapAdaptive(mContext);
         boolean shrinkNonAdaptiveIcons = IconProvider.ATLEAST_OREO && shouldWrapAdaptive;
 
-        // Read the new pref flags that control the depth of the adaptive generation behavior.
-        // pref_colorizedLegacyTreatment — enables full pixel analysis + smart color extraction
-        //     (replaces the simple Palette-based getWrapperBackgroundColor path)
-        // pref_enableWhiteOnlyTreatment — additionally recolors adaptive icons whose background
-        //     is a solid plain white ColorDrawable, by extracting color from the foreground
-        boolean colorizeBackground  = IconPreferencesKt.shouldColorizeBackground(mContext);
-        boolean treatWhiteAdaptive  = colorizeBackground && IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
+        boolean colorizeBackground = IconPreferencesKt.shouldColorizeBackground(mContext);
+        boolean treatWhiteAdaptive = colorizeBackground && IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
 
         float scale;
 
@@ -708,13 +721,9 @@ public class BaseIconFactory implements AutoCloseable {
             // ----------------------------------------------------------------
             // NON-ADAPTIVE ICON PATH
             // ----------------------------------------------------------------
-            // When colorizeBackground is enabled, run the full pixel-level analysis
-            // from the old AdaptiveIconGenerator. Otherwise fall back to the simple
-            // Palette-based background color selection that was here before.
-            // ----------------------------------------------------------------
 
             if (colorizeBackground) {
-                // Run full analysis
+                // Full pixel analysis path.
                 AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
                 analyzeIconPixels(icon, analysis, true);
 
@@ -722,32 +731,30 @@ public class BaseIconFactory implements AutoCloseable {
                 foreground.setDrawable(icon);
 
                 if (analysis.isFullBleed || analysis.noMixinNeeded) {
-                    // For full-bleed and no-mixin icons, apply the aggressive upscaling from
-                    // the old code so the icon fills the shape without a large empty border.
                     if (analysis.aWidth > 0 && analysis.aHeight > 0
                             && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
                         float upScale;
                         if (analysis.noMixinNeeded) {
-                            // Squarish opaque icon: scale to just fit (min of both axes)
+                            // Squarish opaque icon: fit snugly (min of both axes).
                             upScale = Math.min(
                                     analysis.iconWidth  / analysis.aWidth,
                                     analysis.iconHeight / analysis.aHeight);
                             foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
                         } else {
-                            // Full-bleed icon: scale to fill completely (max of both axes)
+                            // Full-bleed: fill aggressively (max of both axes).
                             upScale = Math.max(
                                     analysis.iconWidth  / analysis.aWidth,
                                     analysis.iconHeight / analysis.aHeight);
                             foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
                         }
                     } else {
-                        // Fallback: visible dims not populated (e.g. all-opaque icon)
+                        // Fallback: visible dims not populated (all-opaque icon with no alpha).
                         foreground.setScale(analysis.noMixinNeeded
                                 ? NO_MIXIN_ICON_SCALE
                                 : FULL_BLEED_ICON_SCALE);
                     }
                 } else {
-                    // Regular legacy icon: use the scale the normalizer gave us
+                    // Default: use the normalizer scale.
                     foreground.setScale(analysis.normalizerScale);
                 }
 
@@ -755,13 +762,13 @@ public class BaseIconFactory implements AutoCloseable {
                         new ColorDrawable(analysis.backgroundColor),
                         foreground);
 
-                // Final scale normalisation pass — same double-normalise the old code did
+                // Second normaliser pass — matches the original double-normalise pattern.
                 scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
                 outScale[0] = scale;
                 return wrapper;
 
             } else {
-                // Original simple path — Palette-based background color
+                // Simple Palette-based path (original behavior when colorize is off).
                 scale = new IconNormalizer(mIconBitmapSize).getScale(icon);
 
                 int wrapperBackgroundColor = IconPreferencesKt.getWrapperBackgroundColor(
@@ -785,28 +792,22 @@ public class BaseIconFactory implements AutoCloseable {
             // ADAPTIVE ICON PATH (or wrapping disabled)
             // ----------------------------------------------------------------
             if (icon instanceof AdaptiveIconDrawable aid) {
-                // When treatWhiteAdaptive is enabled, check if this adaptive icon has a plain
-                // white background. If so, extract color from the foreground and recolor it —
-                // this replicates the old AdaptiveIconGenerator treatWhite path.
                 if (treatWhiteAdaptive) {
-                    Drawable background  = aid.getBackground();
-                    Drawable foreground  = aid.getForeground();
+                    Drawable background = aid.getBackground();
+                    Drawable foreground = aid.getForeground();
 
                     if (isSingleColor(background, Color.WHITE) && foreground != null) {
-                        // Run color extraction on the foreground layer only
                         AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
                         analyzeIconPixels(foreground, analysis, true);
 
                         int recoloredBg = analysis.backgroundColor;
 
-                        // Attempt an in-place mutation first (same as old genResult() logic)
                         if (background instanceof ColorDrawable) {
                             AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
                             ((ColorDrawable) mutated.getBackground()).setColor(recoloredBg);
                             outScale[0] = ICON_VISIBLE_AREA_FACTOR;
                             return mutated;
                         } else {
-                            // Background is not a ColorDrawable — reconstruct with new bg
                             CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
                                     new ColorDrawable(recoloredBg), foreground);
                             outScale[0] = ICON_VISIBLE_AREA_FACTOR;
@@ -1035,63 +1036,40 @@ public class BaseIconFactory implements AutoCloseable {
         @Nullable
         SourceHint mSourceHint;
 
-        /**
-         * User for this icon, in case of badging
-         */
         @NonNull
         public IconOptions setUser(@Nullable final UserHandle user) {
             mUserHandle = user;
             return this;
         }
 
-        /**
-         * User for this icon, in case of badging
-         */
         @NonNull
         public IconOptions setUser(@Nullable final UserIconInfo user) {
             mUserIconInfo = user;
             return this;
         }
 
-        /**
-         * If this icon represents an instant app
-         */
         @NonNull
         public IconOptions setInstantApp(final boolean instantApp) {
             mIsInstantApp = instantApp;
             return this;
         }
 
-        /**
-         * If the icon represents an archived app
-         */
         public IconOptions setIsArchived(boolean isArchived) {
             mIsArchived = isArchived;
             return this;
         }
 
-        /**
-         * Disables auto color extraction and overrides the color to the provided value
-         */
         @NonNull
         public IconOptions setExtractedColor(@ColorInt int color) {
             mExtractedColor = color;
             return this;
         }
 
-        /**
-         * Sets the bitmap generation mode to use for the bitmap info. Note that some generation
-         * modes do not support color extraction, so consider setting a extracted color manually
-         * in those cases.
-         */
         public IconOptions setBitmapGenerationMode(@BitmapGenerationMode int generationMode) {
             mGenerationMode = generationMode;
             return this;
         }
 
-        /**
-         * User for this icon, in case of badging
-         */
         @NonNull
         public IconOptions setSourceHint(@Nullable SourceHint sourceHint) {
             mSourceHint = sourceHint;
@@ -1099,11 +1077,6 @@ public class BaseIconFactory implements AutoCloseable {
         }
     }
 
-    /**
-     * An extension of {@link BitmapDrawable} which returns the bitmap pixel size as intrinsic size.
-     * This allows the badging to be done based on the action bitmap size rather than
-     * the scaled bitmap size.
-     */
     private static class FixedSizeBitmapDrawable extends BitmapDrawable {
 
         public FixedSizeBitmapDrawable(@Nullable final Bitmap bitmap) {
