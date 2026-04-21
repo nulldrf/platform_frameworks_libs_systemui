@@ -699,7 +699,34 @@ public class BaseIconFactory implements AutoCloseable {
                 && (transparentScore <= noMixinScore);
 
         if (out.isFullBleed || out.noMixinNeeded) {
-            out.backgroundColor = bestRGB;
+            // For full-bleed and squarish-opaque icons, the original code used bestRGB
+            // directly as the background color. This is correct for colorful icons, but
+            // produces a dark background that is visually indistinguishable from the icon
+            // content when the dominant color is very dark (e.g. FDM's dark navy square).
+            //
+            // Apply the same veryDark detection here: if the dominant color has lightness
+            // below 0.35, or is a desaturated dark gray (lightness < 0.50 && sat < 0.15),
+            // use DEFAULT_WRAPPER_BACKGROUND (white) instead. A white background behind a
+            // dark-colored icon gives much better contrast and matches what the user expects.
+            //
+            // The veryLight check (lightness > 0.75 for single-color icons) is intentionally
+            // NOT applied here — a mostly-white full-bleed icon should still get a white
+            // background (DEFAULT_WRAPPER_BACKGROUND), not a dark one.
+            if (extractColor) {
+                final float[] hslEarly = new float[3];
+                ColorUtils.colorToHSL(bestRGB, hslEarly);
+                final float lightnessEarly  = hslEarly[2];
+                final float saturationEarly = hslEarly[1];
+                final boolean veryDarkEarly = (lightnessEarly < 0.35f)
+                        || (lightnessEarly < 0.50f && saturationEarly < 0.15f);
+                if (veryDarkEarly) {
+                    out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
+                } else {
+                    out.backgroundColor = bestRGB;
+                }
+            } else {
+                out.backgroundColor = bestRGB;
+            }
             out.aWidth     = aWidth;
             out.aHeight    = aHeight;
             out.iconWidth  = width;

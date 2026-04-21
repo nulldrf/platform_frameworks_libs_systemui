@@ -292,10 +292,44 @@ public class IconProvider {
      * We include the Lawnchair adaptive icon pref values here so that toggling
      * "Smart icon backgrounds" or "Recolor white adaptive backgrounds" immediately
      * invalidates ALL existing disk-cached icon bitmaps, forcing them to be rebuilt
-     * with the new processing logic on the next model reload.
+    /**
+     * Version number for Lawnchair's icon rendering code.
+     *
+     * This is included in the system state string (the disk cache freshness key) so that
+     * any change to how we render icons — such as the fix that changed BLACK corner fill
+     * to TRANSPARENT in CustomAdaptiveIconDrawable and BaseIconFactory — forces ALL cached
+     * icon bitmaps to be regenerated on the next model reload.
+     *
+     * Without this, old bitmaps (e.g. ones with black corners from the previous BLACK fill)
+     * would be served from the disk cache indefinitely because the freshnessId for those
+     * icons had not changed (same app version, same locale, same pref values).
+     *
+     * INCREMENT THIS VALUE whenever a code change alters the visual output of icon rendering
+     * in a way that should invalidate previously cached bitmaps for ALL icons.
+     * Examples: changing the mask fill color, changing scale constants, changing shadow logic.
+     *
+     * Current changes included in version 2:
+     *   - CustomAdaptiveIconDrawable.draw(): drawColor(BLACK) → drawColor(TRANSPARENT)
+     *   - BaseIconFactory.getAdaptiveShaderBitmap(): same BLACK → TRANSPARENT fix
+     *   - analyzeIconPixels: veryDark check now applied to noMixinNeeded/isFullBleed path
+     */
+    private static final int LAWNCHAIR_RENDER_VERSION = 2;
+
+    /**
+     * Refreshes the system state definition used to check the validity of an app icon.
+     *
+     * This string is stored as the "freshness identifier" in the icon disk cache (SQLite).
+     * When the string changes, the cache entry is considered stale and the icon is regenerated
+     * from scratch by BaseIconFactory.
+     *
+     * We include the Lawnchair adaptive icon pref values and a rendering version here so that:
+     * 1. Toggling "Smart icon backgrounds" or "Recolor white adaptive backgrounds" immediately
+     *    invalidates ALL existing disk-cached icon bitmaps.
+     * 2. Code changes that alter rendering output (fill colors, scale constants, etc.) also
+     *    invalidate all cached bitmaps by bumping LAWNCHAIR_RENDER_VERSION.
      *
      * Without this, clearMemoryCache() + reloadIfActive() would re-read the old bitmaps
-     * from disk and display them unchanged even after the pref was toggled.
+     * from disk and display them unchanged even after the pref was toggled or code was updated.
      */
     public void updateSystemState() {
         // Base state: locale tags + SDK version (upstream behavior)
@@ -313,7 +347,8 @@ public class IconProvider {
                 + SYSTEM_STATE_SEPARATOR
                 + "w" + (wrapAdaptive ? "1" : "0")
                 + "c" + (colorize    ? "1" : "0")
-                + "t" + (treatWhite  ? "1" : "0");
+                + "t" + (treatWhite  ? "1" : "0")
+                + "r" + LAWNCHAIR_RENDER_VERSION;
     }
 
     /**
