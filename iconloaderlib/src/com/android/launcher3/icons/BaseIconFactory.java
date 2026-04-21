@@ -358,7 +358,12 @@ public class BaseIconFactory implements AutoCloseable {
             @Override
             public void draw(Canvas canvas) {
                 canvas.translate(-bounds.left, -bounds.top);
-                canvas.drawColor(BLACK);
+                // Fill with TRANSPARENT instead of BLACK so that areas outside the
+                // child layers (the extra-inset zone used for parallax/animation effects)
+                // are transparent rather than black. This prevents black corner artifacts
+                // when the user's chosen icon shape (e.g. teardrop) clips into that zone.
+                // Matches the same fix applied to CustomAdaptiveIconDrawable.draw().
+                canvas.drawColor(Color.TRANSPARENT);
                 if (adaptiveIcon.getBackground() != null) {
                     adaptiveIcon.getBackground().draw(canvas);
                 }
@@ -416,10 +421,18 @@ public class BaseIconFactory implements AutoCloseable {
      *
      * Used to detect whether an adaptive icon's background is plain white before deciding
      * whether to recolor it. For ColorDrawable inputs this is a direct integer comparison.
+    /**
+     * Returns true if the given drawable is entirely (or almost entirely) a single opaque color.
+     *
+     * Used to detect whether an adaptive icon's background is plain white before deciding
+     * whether to recolor it. For ColorDrawable inputs this is a direct integer comparison.
      * For other drawables we rasterize to a 64x64 thumbnail and scan every opaque pixel.
      *
-     * BOUNDS CONTRACT: this method saves and restores the drawable's bounds so that the
-     * rasterization pass does not corrupt the caller's subsequent draw calls.
+     * BOUNDS CONTRACT: To avoid mutating the original drawable's bounds (which caused blank
+     * icons when the drawable was later used inside FixedScaleDrawable), we obtain a fresh
+     * copy via getConstantState().newDrawable(). The copy starts with empty bounds, we set
+     * them only on the copy, and the original is never touched. If constantState is null,
+     * we fall back to the save/restore approach but only restore to non-empty bounds.
      */
     private static boolean isSingleColor(@Nullable Drawable drawable, int color) {
         if (drawable == null) {
@@ -429,17 +442,31 @@ public class BaseIconFactory implements AutoCloseable {
             return ((ColorDrawable) drawable).getColor() == color;
         }
 
-        // Save bounds before touching them — see the bounds-restoration note in analyzeIconPixels.
-        final Rect savedBounds = new Rect(drawable.getBounds());
+        // Use a fresh copy so we never set bounds on the original drawable.
+        Drawable rasterTarget = null;
+        final Drawable.ConstantState cs = drawable.getConstantState();
+        if (cs != null) {
+            rasterTarget = cs.newDrawable().mutate();
+        }
 
         final int sampleSize = 64;
         Bitmap bitmap = Bitmap.createBitmap(sampleSize, sampleSize, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(bitmap);
-        drawable.setBounds(0, 0, sampleSize, sampleSize);
-        drawable.draw(canvas);
 
-        // Restore immediately — before any return path below.
-        drawable.setBounds(savedBounds);
+        if (rasterTarget != null) {
+            // Draw the copy — original bounds are untouched.
+            rasterTarget.setBounds(0, 0, sampleSize, sampleSize);
+            rasterTarget.draw(canvas);
+        } else {
+            // constantState unavailable — save and restore original bounds.
+            // Only restore to non-empty bounds to avoid breaking drawable state.
+            final Rect savedBounds = new Rect(drawable.getBounds());
+            drawable.setBounds(0, 0, sampleSize, sampleSize);
+            drawable.draw(canvas);
+            if (!savedBounds.isEmpty()) {
+                drawable.setBounds(savedBounds);
+            }
+        }
 
         int[] pixels = new int[sampleSize * sampleSize];
         bitmap.getPixels(pixels, 0, sampleSize, 0, 0, sampleSize, sampleSize);
@@ -472,12 +499,20 @@ public class BaseIconFactory implements AutoCloseable {
      *   5. Build a posterized RGB histogram in the same pass to find dominant color.
      *   6. Apply HSL-based blending for icons that need a colored background.
      *
-     * BOUNDS CONTRACT: this method saves and restores the drawable's bounds around
-     * the rasterization call. Without this, the drawable's bounds are left at the
-     * analysis raster dimensions, causing drawIconBitmap() to use the wrong size.
-     * On Android 11 this caused all wrapped icons to appear pixelated because
-     * FixedScaleDrawable's foreground was drawn at the analysis resolution instead
-     * of the correct icon bitmap size.
+     * BOUNDS CONTRACT: This method MUST NOT mutate the original drawable's bounds.
+     *
+     * The previous approach (save bounds, setBounds, draw, restore) caused a regression
+     * where icons that had never had bounds set (getBounds() returns Rect(0,0,0,0))
+     * would be restored to empty bounds. When the drawable was then placed inside a
+     * FixedScaleDrawable, DrawableWrapper.draw() calls getDrawable().draw(canvas) which
+     * uses the inner drawable's OWN bounds — and with empty bounds, nothing was drawn.
+     * Hunter, LetsVPN, and other icons appeared completely blank when Smart Backgrounds
+     * was enabled.
+     *
+     * The correct approach: obtain a fresh Drawable via getConstantState().newDrawable()
+     * and set bounds only on the copy. The original extractee is never touched.
+     * If ConstantState is unavailable, fall back to save/restore but only restore to
+     * non-empty bounds (empty = "never set" sentinel, safe to leave at analysis size).
      *
      * @param extractee    Raw legacy icon or adaptive foreground layer to analyze.
      * @param out          Receives isFullBleed, noMixinNeeded, backgroundColor,
@@ -491,6 +526,10 @@ public class BaseIconFactory implements AutoCloseable {
             boolean extractColor) {
 
         // Step 0: normalizer scale (used by caller for the default scale path).
+        // IconNormalizer.getScale() also calls setBounds() on the drawable, but it does
+        // so only on AdaptiveIconDrawable sub-types (returns early). For non-adaptive
+        // drawables it uses its OWN internal Bitmap canvas and a fresh setBounds call
+        // without disturbing the passed-in drawable's external bounds state.
         out.normalizerScale = new IconNormalizer(mIconBitmapSize).getScale(extractee);
 
         // Step 1: determine raster dimensions.
@@ -506,21 +545,38 @@ public class BaseIconFactory implements AutoCloseable {
             height = mIconBitmapSize;
         }
 
-        // Save bounds BEFORE modifying them.
-        // setBounds() mutates shared drawable state. If we don't restore here, then when
-        // drawIconBitmap() later calls mOldBounds.set(icon.getBounds()) it captures the
-        // analysis raster size rather than the unset/pre-existing bounds. The FixedScaleDrawable
-        // foreground layer then draws at the wrong intrinsic size reference — on Android 11
-        // this manifested as pixelation across all icons regardless of shape.
-        final Rect savedBounds = new Rect(extractee.getBounds());
-
-        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmap);
-        extractee.setBounds(0, 0, width, height);
-        extractee.draw(canvas);
-
-        // Restore bounds immediately, before any early return below.
-        extractee.setBounds(savedBounds);
+        // Obtain a drawable to rasterize WITHOUT mutating the original's bounds.
+        // We use ConstantState.newDrawable() to get a fresh independent copy.
+        // If ConstantState is unavailable (e.g. certain custom drawables), we fall
+        // back to setting bounds on the original — but only restore to non-empty
+        // saved bounds, since empty bounds == "never set" and should be left alone.
+        Bitmap bitmap;
+        {
+            final Drawable.ConstantState cs = extractee.getConstantState();
+            if (cs != null) {
+                // Rasterize a fresh copy — original extractee bounds are untouched.
+                final Drawable copy = cs.newDrawable().mutate();
+                bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                final Canvas canvas = new Canvas(bitmap);
+                copy.setBounds(0, 0, width, height);
+                copy.draw(canvas);
+                // copy goes out of scope and is GC'd; no cleanup needed.
+            } else {
+                // Fallback: mutate original bounds, restore only if they were non-empty.
+                final Rect savedBounds = new Rect(extractee.getBounds());
+                bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                final Canvas canvas = new Canvas(bitmap);
+                extractee.setBounds(0, 0, width, height);
+                extractee.draw(canvas);
+                if (!savedBounds.isEmpty()) {
+                    extractee.setBounds(savedBounds);
+                }
+                // If savedBounds was empty, leave bounds at (0,0,width,height).
+                // This is a BitmapDrawable or similar that has never had bounds set by
+                // the caller — leaving non-empty bounds here is harmless because
+                // drawIconBitmap() will set its own bounds via mOldBounds/setBounds.
+            }
+        }
 
         if (!bitmap.hasAlpha()) {
             out.isFullBleed      = true;

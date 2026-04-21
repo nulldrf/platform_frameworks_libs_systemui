@@ -163,17 +163,27 @@ fun drawableToBitmap(drawable: Drawable): Bitmap {
 
     val width = drawable.intrinsicWidth.coerceAtLeast(1)
     val height = drawable.intrinsicHeight.coerceAtLeast(1)
-
-    // Save bounds before mutating — see contract note above.
-    val savedBounds = Rect(drawable.bounds)
-
     val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
-    drawable.setBounds(0, 0, canvas.width, canvas.height)
-    drawable.draw(canvas)
 
-    // Restore immediately — before returning so all callers see the original state.
-    drawable.setBounds(savedBounds)
+    // Prefer a ConstantState copy so the original drawable's bounds are never mutated.
+    // If we set bounds on the original and later restore to empty (Rect(0,0,0,0)),
+    // any FixedScaleDrawable that holds the same drawable reference would wrap a
+    // zero-bounds drawable and draw nothing — causing blank icons.
+    val copy = drawable.constantState?.newDrawable()?.mutate()
+    if (copy != null) {
+        copy.setBounds(0, 0, width, height)
+        copy.draw(canvas)
+    } else {
+        // No ConstantState — fall back to mutating the original bounds,
+        // but only restore if they were non-empty before we touched them.
+        val savedBounds = Rect(drawable.bounds)
+        drawable.setBounds(0, 0, width, height)
+        drawable.draw(canvas)
+        if (!savedBounds.isEmpty) {
+            drawable.setBounds(savedBounds)
+        }
+    }
 
     return bitmap
 }
