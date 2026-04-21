@@ -65,12 +65,21 @@ fun Context.shouldColorizeBackground(): Boolean =
     prefs.getBoolean("pref_colorizedLegacyTreatment", false)
 
 /**
- * Whether to recolor adaptive icons whose background is a solid plain-white ColorDrawable.
+ * Whether to recolor adaptive icon backgrounds based on the foreground content.
  *
- * Many older apps shipped adaptive icons with a white background layer and a colored foreground.
- * On dark wallpapers the white background is jarring. When this option is enabled, Lawnchair
- * extracts the dominant color from the foreground layer and uses it to replace the white
- * background — making the icon look intentionally colored rather than accidental.
+ * When enabled (and [shouldColorizeBackground] is also on), this analyzes the foreground
+ * layer of adaptive icons and replaces the background in the following cases:
+ *
+ *   - Background is white or near-white (lightness > 0.90): many apps ship with plain
+ *     white backgrounds; we replace with a color derived from the foreground.
+ *   - Background is very dark (lightness < 0.35): dark backgrounds on dark wallpapers
+ *     make icons disappear; we replace with a color that provides better contrast.
+ *   - Background is a desaturated dark gray (lightness < 0.50, saturation < 0.15):
+ *     these near-black backgrounds have the same visibility problem as very dark ones.
+ *
+ * For adaptive icons with a "good" mid-range colored background, no change is made.
+ * For non-ColorDrawable backgrounds (gradients, images), only the white-detection
+ * path applies (same as the original behavior) for safety.
  *
  * This option only has an effect when [shouldColorizeBackground] is also true.
  *

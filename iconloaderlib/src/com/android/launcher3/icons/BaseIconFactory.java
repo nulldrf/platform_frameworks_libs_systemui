@@ -814,9 +814,27 @@ public class BaseIconFactory implements AutoCloseable {
         boolean shrinkNonAdaptiveIcons = IconProvider.ATLEAST_OREO && shouldWrapAdaptive;
 
         boolean colorizeBackground = IconPreferencesKt.shouldColorizeBackground(mContext);
+        // treatWhiteAdaptive is the UI toggle "Recolor white adaptive icon backgrounds".
+        // When colorizeBackground is also on, we extend this to all adaptive icons whose
+        // background is a solid color — not just white ones. See the adaptive path below.
         boolean treatWhiteAdaptive = colorizeBackground && IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
 
         float scale;
+
+        // ----------------------------------------------------------------
+        // FIX for 720p pixelation:
+        // BitmapDrawable loaded from apps at mdpi density (48px) on hdpi devices (72px)
+        // produces a pixelated result when upscaled inside FixedScaleDrawable.
+        // Calling setTargetDensity() ensures the drawable reports the correct intrinsic
+        // size for the display, so FixedScaleDrawable wraps it at the right dimensions.
+        // We only do this for non-adaptive BitmapDrawable since adaptive icons handle
+        // their own density scaling internally.
+        if (icon instanceof BitmapDrawable bmd && !(icon instanceof AdaptiveIconDrawable)) {
+            android.graphics.Bitmap b = bmd.getBitmap();
+            if (b != null && b.getDensity() != android.graphics.Bitmap.DENSITY_NONE) {
+                bmd.setTargetDensity(mContext.getResources().getDisplayMetrics());
+            }
+        }
 
         if (shrinkNonAdaptiveIcons && !(icon instanceof AdaptiveIconDrawable)) {
             // ----------------------------------------------------------------
@@ -836,26 +854,22 @@ public class BaseIconFactory implements AutoCloseable {
                             && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
                         float upScale;
                         if (analysis.noMixinNeeded) {
-                            // Squarish opaque icon: fit snugly (min of both axes).
                             upScale = Math.min(
                                     analysis.iconWidth  / analysis.aWidth,
                                     analysis.iconHeight / analysis.aHeight);
                             foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
                         } else {
-                            // Full-bleed: fill aggressively (max of both axes).
                             upScale = Math.max(
                                     analysis.iconWidth  / analysis.aWidth,
                                     analysis.iconHeight / analysis.aHeight);
                             foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
                         }
                     } else {
-                        // Fallback: visible dims not populated (all-opaque icon with no alpha).
                         foreground.setScale(analysis.noMixinNeeded
                                 ? NO_MIXIN_ICON_SCALE
                                 : FULL_BLEED_ICON_SCALE);
                     }
                 } else {
-                    // Default: use the normalizer scale.
                     foreground.setScale(analysis.normalizerScale);
                 }
 
@@ -863,7 +877,6 @@ public class BaseIconFactory implements AutoCloseable {
                         new ColorDrawable(analysis.backgroundColor),
                         foreground);
 
-                // Second normaliser pass — matches the original double-normalise pattern.
                 scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
                 outScale[0] = scale;
                 return wrapper;
@@ -897,22 +910,64 @@ public class BaseIconFactory implements AutoCloseable {
                     Drawable background = aid.getBackground();
                     Drawable foreground = aid.getForeground();
 
-                    if (isSingleColor(background, Color.WHITE) && foreground != null) {
-                        AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
-                        analyzeIconPixels(foreground, analysis, true);
+                    if (foreground != null) {
+                        // Determine the existing background color so we can decide
+                        // whether to replace it.
+                        //
+                        // The old "treatWhite" behavior only replaced backgrounds that were
+                        // pure white (isSingleColor(bg, WHITE)). This missed icons like FDM
+                        // (dark navy background) and ColorNote (various solid backgrounds)
+                        // that the user expects to be recolored.
+                        //
+                        // New behavior when colorizeBackground is also on:
+                        // We examine the background ColorDrawable color directly. If the
+                        // background is a ColorDrawable we can check its HSL lightness and
+                        // saturation. We replace the background in three cases:
+                        //   a) It is pure/near white (lightness > 0.90) — existing behavior
+                        //   b) It is very dark (lightness < 0.35) — dark backgrounds make
+                        //      the icon hard to distinguish on dark wallpapers
+                        //   c) It is very desaturated dark gray (lightness < 0.50, sat < 0.15)
+                        // For non-ColorDrawable backgrounds (gradients, drawables), we fall
+                        // through to the isSingleColor(WHITE) check for safety.
+                        //
+                        // In all replacement cases we run analyzeIconPixels() on the foreground
+                        // to extract the best representative color for the new background.
+                        boolean shouldRecolor = false;
 
-                        int recoloredBg = analysis.backgroundColor;
+                        if (background instanceof ColorDrawable cd) {
+                            int bgColor = cd.getColor();
+                            float[] bgHsl = new float[3];
+                            ColorUtils.colorToHSL(bgColor, bgHsl);
+                            float bgLightness  = bgHsl[2];
+                            float bgSaturation = bgHsl[1];
 
-                        if (background instanceof ColorDrawable) {
-                            AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
-                            ((ColorDrawable) mutated.getBackground()).setColor(recoloredBg);
-                            outScale[0] = ICON_VISIBLE_AREA_FACTOR;
-                            return mutated;
+                            // Replace if white/near-white OR very dark OR dark desaturated gray
+                            shouldRecolor = (bgLightness > 0.90f)
+                                    || (bgLightness < 0.35f)
+                                    || (bgLightness < 0.50f && bgSaturation < 0.15f);
                         } else {
-                            CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
-                                    new ColorDrawable(recoloredBg), foreground);
-                            outScale[0] = ICON_VISIBLE_AREA_FACTOR;
-                            return rebuilt;
+                            // Non-ColorDrawable background: only replace if it looks like
+                            // a solid white (matches original treatWhite behavior).
+                            shouldRecolor = isSingleColor(background, Color.WHITE);
+                        }
+
+                        if (shouldRecolor) {
+                            AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
+                            analyzeIconPixels(foreground, analysis, true);
+
+                            int recoloredBg = analysis.backgroundColor;
+
+                            if (background instanceof ColorDrawable) {
+                                AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
+                                ((ColorDrawable) mutated.getBackground()).setColor(recoloredBg);
+                                outScale[0] = ICON_VISIBLE_AREA_FACTOR;
+                                return mutated;
+                            } else {
+                                CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
+                                        new ColorDrawable(recoloredBg), foreground);
+                                outScale[0] = ICON_VISIBLE_AREA_FACTOR;
+                                return rebuilt;
+                            }
                         }
                     }
                 }

@@ -295,25 +295,18 @@ public class IconProvider {
     /**
      * Version number for Lawnchair's icon rendering code.
      *
-     * This is included in the system state string (the disk cache freshness key) so that
-     * any change to how we render icons — such as the fix that changed BLACK corner fill
-     * to TRANSPARENT in CustomAdaptiveIconDrawable and BaseIconFactory — forces ALL cached
-     * icon bitmaps to be regenerated on the next model reload.
+     * Increment this whenever a code change alters the visual output of icon rendering
+     * in a way that should invalidate all previously cached bitmaps.
      *
-     * Without this, old bitmaps (e.g. ones with black corners from the previous BLACK fill)
-     * would be served from the disk cache indefinitely because the freshnessId for those
-     * icons had not changed (same app version, same locale, same pref values).
-     *
-     * INCREMENT THIS VALUE whenever a code change alters the visual output of icon rendering
-     * in a way that should invalidate previously cached bitmaps for ALL icons.
-     * Examples: changing the mask fill color, changing scale constants, changing shadow logic.
-     *
-     * Current changes included in version 2:
-     *   - CustomAdaptiveIconDrawable.draw(): drawColor(BLACK) → drawColor(TRANSPARENT)
-     *   - BaseIconFactory.getAdaptiveShaderBitmap(): same BLACK → TRANSPARENT fix
-     *   - analyzeIconPixels: veryDark check now applied to noMixinNeeded/isFullBleed path
+     * Version history:
+     *   1 — baseline (no version field)
+     *   2 — CustomAdaptiveIconDrawable/getAdaptiveShaderBitmap: BLACK → TRANSPARENT fill;
+     *       analyzeIconPixels: veryDark check added to noMixinNeeded/isFullBleed path
+     *   3 — normalizeAndWrapToAdaptiveIcon: adaptive icon path extended to recolor
+     *       very-dark and near-white backgrounds (not just pure white);
+     *       BitmapDrawable density fix for 720p pixelation
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 2;
+    private static final int LAWNCHAIR_RENDER_VERSION = 3;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.
