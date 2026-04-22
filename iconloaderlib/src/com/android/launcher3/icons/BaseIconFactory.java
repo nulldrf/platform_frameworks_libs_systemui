@@ -814,9 +814,10 @@ public class BaseIconFactory implements AutoCloseable {
         boolean shrinkNonAdaptiveIcons = IconProvider.ATLEAST_OREO && shouldWrapAdaptive;
 
         boolean colorizeBackground = IconPreferencesKt.shouldColorizeBackground(mContext);
-        // treatWhiteAdaptive is the UI toggle "Recolor white adaptive icon backgrounds".
-        // When colorizeBackground is also on, we extend this to all adaptive icons whose
-        // background is a solid color — not just white ones. See the adaptive path below.
+        // treatWhiteAdaptive: when ON, foreground-only adaptive icons (transparent background)
+        // get a dominant color extracted from the foreground instead of plain white.
+        // It has no effect on adaptive icons that have a real (non-transparent) background —
+        // those are always returned untouched regardless of this flag.
         boolean treatWhiteAdaptive = colorizeBackground && IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
 
         float scale;
@@ -906,70 +907,58 @@ public class BaseIconFactory implements AutoCloseable {
             // ADAPTIVE ICON PATH (or wrapping disabled)
             // ----------------------------------------------------------------
             if (icon instanceof AdaptiveIconDrawable aid) {
-                if (treatWhiteAdaptive) {
+                if (colorizeBackground) {
+                    // RULE (per Android adaptive icon spec):
+                    //
+                    // An adaptive icon has two layers:
+                    //   - background: fills the full 108x108dp canvas, provides the colored base
+                    //   - foreground: the actual icon content (logo, illustration, etc.)
+                    //
+                    // If the icon has a REAL background (non-null, non-transparent ColorDrawable
+                    // or any drawable that renders visible content), the developer intentionally
+                    // designed the icon with that background — we MUST NOT change it. Replacing
+                    // a developer-designed background destroys the intended look (e.g. FDM's dark
+                    // teal, ColorNote's yellow, Camera's red, YouTube's red).
+                    //
+                    // If the background is null or fully transparent, the icon is "foreground-only"
+                    // — the developer provided only icon art with no background, expecting the
+                    // launcher to supply one. In this case we should apply a background:
+                    //   - wrapAdaptive ON only: white background (DEFAULT_WRAPPER_BACKGROUND)
+                    //   - wrapAdaptive + recolor ON: dominant color extracted from the foreground
+
                     Drawable background = aid.getBackground();
                     Drawable foreground = aid.getForeground();
 
-                    if (foreground != null) {
-                        // Determine the existing background color so we can decide
-                        // whether to replace it.
-                        //
-                        // The old "treatWhite" behavior only replaced backgrounds that were
-                        // pure white (isSingleColor(bg, WHITE)). This missed icons like FDM
-                        // (dark navy background) and ColorNote (various solid backgrounds)
-                        // that the user expects to be recolored.
-                        //
-                        // New behavior when colorizeBackground is also on:
-                        // We examine the background ColorDrawable color directly. If the
-                        // background is a ColorDrawable we can check its HSL lightness and
-                        // saturation. We replace the background in three cases:
-                        //   a) It is pure/near white (lightness > 0.90) — existing behavior
-                        //   b) It is very dark (lightness < 0.35) — dark backgrounds make
-                        //      the icon hard to distinguish on dark wallpapers
-                        //   c) It is very desaturated dark gray (lightness < 0.50, sat < 0.15)
-                        // For non-ColorDrawable backgrounds (gradients, drawables), we fall
-                        // through to the isSingleColor(WHITE) check for safety.
-                        //
-                        // In all replacement cases we run analyzeIconPixels() on the foreground
-                        // to extract the best representative color for the new background.
-                        boolean shouldRecolor = false;
-
-                        if (background instanceof ColorDrawable cd) {
-                            int bgColor = cd.getColor();
-                            float[] bgHsl = new float[3];
-                            ColorUtils.colorToHSL(bgColor, bgHsl);
-                            float bgLightness  = bgHsl[2];
-                            float bgSaturation = bgHsl[1];
-
-                            // Replace if white/near-white OR very dark OR dark desaturated gray
-                            shouldRecolor = (bgLightness > 0.90f)
-                                    || (bgLightness < 0.35f)
-                                    || (bgLightness < 0.50f && bgSaturation < 0.15f);
-                        } else {
-                            // Non-ColorDrawable background: only replace if it looks like
-                            // a solid white (matches original treatWhite behavior).
-                            shouldRecolor = isSingleColor(background, Color.WHITE);
-                        }
-
-                        if (shouldRecolor) {
+                    if (isBackgroundTransparent(background) && foreground != null) {
+                        // Foreground-only adaptive icon — apply smart background.
+                        int newBg;
+                        if (treatWhiteAdaptive) {
+                            // Recolor: extract dominant color from the foreground layer.
                             AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
                             analyzeIconPixels(foreground, analysis, true);
+                            newBg = analysis.backgroundColor;
+                        } else {
+                            // Smart adaptive only, no recolor: use plain white.
+                            newBg = DEFAULT_WRAPPER_BACKGROUND;
+                        }
 
-                            int recoloredBg = analysis.backgroundColor;
-
-                            if (background instanceof ColorDrawable) {
-                                AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
-                                ((ColorDrawable) mutated.getBackground()).setColor(recoloredBg);
-                                outScale[0] = ICON_VISIBLE_AREA_FACTOR;
-                                return mutated;
-                            } else {
-                                CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
-                                        new ColorDrawable(recoloredBg), foreground);
-                                outScale[0] = ICON_VISIBLE_AREA_FACTOR;
-                                return rebuilt;
-                            }
+                        // Apply the new background.
+                        // If the existing background is already a ColorDrawable (just transparent),
+                        // mutate it in place. Otherwise rebuild with a fresh ColorDrawable.
+                        if (background instanceof ColorDrawable) {
+                            AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
+                            ((ColorDrawable) mutated.getBackground()).setColor(newBg);
+                            outScale[0] = ICON_VISIBLE_AREA_FACTOR;
+                            return mutated;
+                        } else {
+                            // background is null or non-ColorDrawable transparent drawable
+                            CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
+                                    new ColorDrawable(newBg), foreground);
+                            outScale[0] = ICON_VISIBLE_AREA_FACTOR;
+                            return rebuilt;
                         }
                     }
+                    // Background has real content — return untouched.
                 }
 
                 outScale[0] = ICON_VISIBLE_AREA_FACTOR;
@@ -985,6 +974,52 @@ public class BaseIconFactory implements AutoCloseable {
                 return icon;
             }
         }
+    }
+
+    /**
+     * Returns true if the given background drawable is null or effectively transparent —
+     * meaning the adaptive icon has no real background and expects the launcher to supply one.
+     *
+     * A background is considered transparent if:
+     *   - It is null (no background layer was provided)
+     *   - It is a ColorDrawable with alpha == 0
+     *   - It rasterizes to > 95% transparent pixels (complex drawable that happens to be empty)
+     *
+     * We do NOT consider near-transparent or semi-transparent backgrounds as "transparent"
+     * because that would cause us to replace an intentionally subtle background.
+     */
+    private static boolean isBackgroundTransparent(@Nullable Drawable background) {
+        if (background == null) {
+            return true;
+        }
+        if (background instanceof ColorDrawable cd) {
+            // ColorDrawable with zero alpha = transparent
+            return Color.alpha(cd.getColor()) == 0;
+        }
+        // For complex drawables: rasterize a small sample and check pixel transparency.
+        // If >= 95% of pixels are fully transparent, we consider this a "no background" case.
+        final int sampleSize = 32;
+        final Drawable.ConstantState cs = background.getConstantState();
+        final Drawable rasterTarget = (cs != null) ? cs.newDrawable().mutate() : background;
+        Bitmap bitmap = Bitmap.createBitmap(sampleSize, sampleSize, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(bitmap);
+        rasterTarget.setBounds(0, 0, sampleSize, sampleSize);
+        rasterTarget.draw(canvas);
+        if (rasterTarget == background) {
+            // We mutated the original — restore bounds to prevent downstream issues.
+            background.setBounds(0, 0, 0, 0);
+        }
+        int[] pixels = new int[sampleSize * sampleSize];
+        bitmap.getPixels(pixels, 0, sampleSize, 0, 0, sampleSize, sampleSize);
+        bitmap.recycle();
+        int transparentCount = 0;
+        for (int pixel : pixels) {
+            if (((pixel >> 24) & 0xFF) < 10) {
+                transparentCount++;
+            }
+        }
+        // > 95% transparent pixels = effectively no background
+        return (float) transparentCount / pixels.length > 0.95f;
     }
 
     /**

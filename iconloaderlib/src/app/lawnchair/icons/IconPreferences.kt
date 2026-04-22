@@ -65,21 +65,22 @@ fun Context.shouldColorizeBackground(): Boolean =
     prefs.getBoolean("pref_colorizedLegacyTreatment", false)
 
 /**
- * Whether to recolor adaptive icon backgrounds based on the foreground content.
+ * Whether to use the dominant foreground color as the background for foreground-only
+ * adaptive icons (instead of plain white).
  *
- * When enabled (and [shouldColorizeBackground] is also on), this analyzes the foreground
- * layer of adaptive icons and replaces the background in the following cases:
+ * This setting ONLY affects adaptive icons whose background layer is null or fully
+ * transparent. These are "foreground-only" icons where the developer provided only
+ * the icon art and expected the launcher to supply a background color.
  *
- *   - Background is white or near-white (lightness > 0.90): many apps ship with plain
- *     white backgrounds; we replace with a color derived from the foreground.
- *   - Background is very dark (lightness < 0.35): dark backgrounds on dark wallpapers
- *     make icons disappear; we replace with a color that provides better contrast.
- *   - Background is a desaturated dark gray (lightness < 0.50, saturation < 0.15):
- *     these near-black backgrounds have the same visibility problem as very dark ones.
+ * Adaptive icons that have a REAL background (any non-transparent color or drawable)
+ * are NEVER touched by this setting — the developer's intended background is preserved.
  *
- * For adaptive icons with a "good" mid-range colored background, no change is made.
- * For non-ColorDrawable backgrounds (gradients, images), only the white-detection
- * path applies (same as the original behavior) for safety.
+ * Behavior:
+ *   - [shouldColorizeBackground] ON, this OFF:
+ *       Foreground-only adaptive icons get a white background.
+ *   - [shouldColorizeBackground] ON, this ON:
+ *       Foreground-only adaptive icons get a background colored by the dominant
+ *       color extracted from the foreground using the full pixel analysis.
  *
  * This option only has an effect when [shouldColorizeBackground] is also true.
  *

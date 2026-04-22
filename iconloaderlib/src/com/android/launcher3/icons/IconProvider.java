@@ -302,11 +302,12 @@ public class IconProvider {
      *   1 — baseline (no version field)
      *   2 — CustomAdaptiveIconDrawable/getAdaptiveShaderBitmap: BLACK → TRANSPARENT fill;
      *       analyzeIconPixels: veryDark check added to noMixinNeeded/isFullBleed path
-     *   3 — normalizeAndWrapToAdaptiveIcon: adaptive icon path extended to recolor
-     *       very-dark and near-white backgrounds (not just pure white);
+     *   3 — adaptive icon path extended (later reverted to simpler approach)
+     *   4 — adaptive icon path: ONLY process foreground-only icons (null/transparent bg);
+     *       icons with real backgrounds are returned completely untouched;
      *       BitmapDrawable density fix for 720p pixelation
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 3;
+    private static final int LAWNCHAIR_RENDER_VERSION = 4;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.
