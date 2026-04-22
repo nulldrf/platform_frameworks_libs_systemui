@@ -306,8 +306,11 @@ public class IconProvider {
      *   4 — adaptive icon path: ONLY process foreground-only icons (null/transparent bg);
      *       icons with real backgrounds are returned completely untouched;
      *       BitmapDrawable density fix for 720p pixelation
+     *   5 — simplified background logic: HSL-blend-toward-0xFF333333 removed entirely;
+     *       Case 3 (legacy) always uses white or Palette+lightness; no more deep-blue FDM/Hunter;
+     *       Case 2 (partial adaptive) uses getWrapperBackgroundColor for recolor
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 4;
+    private static final int LAWNCHAIR_RENDER_VERSION = 5;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.

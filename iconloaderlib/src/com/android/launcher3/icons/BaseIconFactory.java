@@ -493,37 +493,29 @@ public class BaseIconFactory implements AutoCloseable {
      *   3. Compute padding-corrected transparency thresholds (10% = full-bleed,
      *      27% = no-mixin) matching the original AdaptiveIconGenerator constants.
      *   4. If the icon is mostly transparent (> TRANSPARENT_BACKGROUND_THRESHOLD),
-     *      it has no natural background — use white directly and skip color blending.
-     *      This prevents the deep-blue result that occurs when thin colored strokes
-     *      are posterized and blended toward 0xFF333333.
+     *      it has no natural background — mark isMostlyTransparent=true and use white.
+     *      Caller decides the final color based on recolor preference.
      *   5. Build a posterized RGB histogram in the same pass to find dominant color.
-     *   6. Apply HSL-based blending for icons that need a colored background.
+     *   6. For full-bleed / noMixin icons, use bestRGB (veryDark-guarded) as background.
+     *   7. For normal icons with padding, always return white. Caller applies
+     *      getWrapperBackgroundColor() if recolor is enabled.
+     *
+     * NOTE: The HSL-blend-toward-0xFF333333 path from the old implementation has been
+     * removed entirely. That path caused FDM, Hunter, and other dark-logo icons to get
+     * deep-blue or charcoal backgrounds. Background coloring for normal icons now always
+     * goes through Palette + forced-lightness (getWrapperBackgroundColor), which the user
+     * can tune via pref_coloredBackgroundLightness.
      *
      * BOUNDS CONTRACT: This method MUST NOT mutate the original drawable's bounds.
-     *
-     * The previous approach (save bounds, setBounds, draw, restore) caused a regression
-     * where icons that had never had bounds set (getBounds() returns Rect(0,0,0,0))
-     * would be restored to empty bounds. When the drawable was then placed inside a
-     * FixedScaleDrawable, DrawableWrapper.draw() calls getDrawable().draw(canvas) which
-     * uses the inner drawable's OWN bounds — and with empty bounds, nothing was drawn.
-     * Hunter, LetsVPN, and other icons appeared completely blank when Smart Backgrounds
-     * was enabled.
-     *
-     * The correct approach: obtain a fresh Drawable via getConstantState().newDrawable()
-     * and set bounds only on the copy. The original extractee is never touched.
-     * If ConstantState is unavailable, fall back to save/restore but only restore to
-     * non-empty bounds (empty = "never set" sentinel, safe to leave at analysis size).
+     * See the detailed comment in the old implementation for the full explanation.
      *
      * @param extractee    Raw legacy icon or adaptive foreground layer to analyze.
-     * @param out          Receives isFullBleed, noMixinNeeded, backgroundColor,
-     *                     normalizerScale, and visible dimensions.
-     * @param extractColor If false, skip HSL blending and use white (unless full-bleed
-     *                     or no-mixin, where bestRGB is always used regardless).
+     * @param out          Receives isFullBleed, noMixinNeeded, isMostlyTransparent,
+     *                     backgroundColor, normalizerScale, and visible dimensions.
      */
     private void analyzeIconPixels(
             @NonNull Drawable extractee,
-            @NonNull AdaptiveIconAnalysis out,
-            boolean extractColor) {
+            @NonNull AdaptiveIconAnalysis out) {
 
         // Step 0: normalizer scale (used by caller for the default scale path).
         // IconNormalizer.getScale() also calls setBounds() on the drawable, but it does
@@ -652,9 +644,6 @@ public class BaseIconFactory implements AutoCloseable {
                 if (transparentScore > maxTransparent && !out.fullBleedChecked) {
                     out.isFullBleed      = false;
                     out.fullBleedChecked = true;
-                    if (!extractColor) {
-                        break;
-                    }
                 }
                 continue;
             }
@@ -680,11 +669,12 @@ public class BaseIconFactory implements AutoCloseable {
 
         // Step 5: transparent-background guard.
         // If the majority of pixels are transparent, the icon is foreground art on a
-        // transparent canvas — extracting a background color from the art itself and then
-        // blending it toward near-black produces wrong results (deep blue on Apktool M,
-        // dark tints on many Google app icons, etc.). Use white unconditionally here.
+        // transparent canvas. Mark it so the caller can decide the background (white).
+        // We do NOT attempt to extract a representative color from thin strokes because
+        // that produces wrong tints (deep-blue on Apktool M, dark tints on Google icons).
         final float transparentFraction = (float) transparentScore / totalPixels;
         if (transparentFraction > TRANSPARENT_BACKGROUND_THRESHOLD) {
+            out.isMostlyTransparent = true;
             out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
             out.aWidth     = aWidth;
             out.aHeight    = aHeight;
@@ -699,34 +689,17 @@ public class BaseIconFactory implements AutoCloseable {
                 && (transparentScore <= noMixinScore);
 
         if (out.isFullBleed || out.noMixinNeeded) {
-            // For full-bleed and squarish-opaque icons, the original code used bestRGB
-            // directly as the background color. This is correct for colorful icons, but
-            // produces a dark background that is visually indistinguishable from the icon
-            // content when the dominant color is very dark (e.g. FDM's dark navy square).
-            //
-            // Apply the same veryDark detection here: if the dominant color has lightness
-            // below 0.35, or is a desaturated dark gray (lightness < 0.50 && sat < 0.15),
-            // use DEFAULT_WRAPPER_BACKGROUND (white) instead. A white background behind a
-            // dark-colored icon gives much better contrast and matches what the user expects.
-            //
-            // The veryLight check (lightness > 0.75 for single-color icons) is intentionally
-            // NOT applied here — a mostly-white full-bleed icon should still get a white
-            // background (DEFAULT_WRAPPER_BACKGROUND), not a dark one.
-            if (extractColor) {
-                final float[] hslEarly = new float[3];
-                ColorUtils.colorToHSL(bestRGB, hslEarly);
-                final float lightnessEarly  = hslEarly[2];
-                final float saturationEarly = hslEarly[1];
-                final boolean veryDarkEarly = (lightnessEarly < 0.35f)
-                        || (lightnessEarly < 0.50f && saturationEarly < 0.15f);
-                if (veryDarkEarly) {
-                    out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
-                } else {
-                    out.backgroundColor = bestRGB;
-                }
-            } else {
-                out.backgroundColor = bestRGB;
-            }
+            // For full-bleed / squarish-opaque icons the background is barely visible
+            // at the shape-mask corners. Use the dominant pixel color directly, but
+            // guard against very dark dominants (FDM-style dark navy) that would make
+            // corners indistinguishable from the icon content.
+            final float[] hsl = new float[3];
+            ColorUtils.colorToHSL(bestRGB, hsl);
+            final float lightness   = hsl[2];
+            final float saturation  = hsl[1];
+            final boolean veryDark  = (lightness < 0.35f)
+                    || (lightness < 0.50f && saturation < 0.15f);
+            out.backgroundColor = veryDark ? DEFAULT_WRAPPER_BACKGROUND : bestRGB;
             out.aWidth     = aWidth;
             out.aHeight    = aHeight;
             out.iconWidth  = width;
@@ -734,50 +707,12 @@ public class BaseIconFactory implements AutoCloseable {
             return;
         }
 
-        // Step 7: plain white if color extraction is disabled.
-        if (!extractColor) {
-            out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
-            return;
-        }
-
-        // Step 8: HSL-based color mixing — ported from AdaptiveIconGenerator with one fix.
-        final int numColors       = rgbScoreHistogram.size();
-        final boolean singleColor = numColors <= SINGLE_COLOR_LIMIT;
-
-        final float[] hsl = new float[3];
-        ColorUtils.colorToHSL(bestRGB, hsl);
-        final float lightness  = hsl[2];
-        final float saturation = hsl[1];
-
-        final boolean light = lightness > 0.5f;
-
-        // Blend toward dark background for mostly-white single-color icons.
-        final boolean veryLight = lightness > 0.75f && singleColor;
-
-        // Blend toward white background for dark-dominant icons.
-        //
-        // CHANGE from the original AdaptiveIconGenerator:
-        // The original required (singleColor) as well as (lightness < 0.35), meaning icons
-        // with dark content spread across many posterized color buckets — like FDM's dark-navy
-        // logo with rounded corners and subtle shading — were not classified as veryDark.
-        // They fell into the "fill = 0xFF333333" branch and got blended toward near-black,
-        // producing a deep-blue or charcoal background that was visually wrong.
-        //
-        // New rule: any icon whose dominant color has lightness < 0.35 is treated as veryDark
-        // regardless of color count, because blending a dark color further toward 0xFF333333
-        // always makes it darker and never improves it. We add a secondary catch for
-        // desaturated mid-tones (dark grays): lightness < 0.50 AND saturation < 0.15.
-        final boolean veryDark = (lightness < 0.35f)
-                || (lightness < 0.50f && saturation < 0.15f);
-
-        final int opaqueSize   = totalPixels - transparentScore;
-        final float pxPerColor = opaqueSize / (float) numColors;
-        // mixRatio in [0.15, 0.70]: higher ratio = more fill color blended in.
-        float mixRatio = Math.min(Math.max(pxPerColor / highScore, 0.15f), 0.70f);
-
-        int fill = ((light && !veryLight) || veryDark) ? 0xFFFFFFFF : 0xFF333333;
-        out.backgroundColor = ColorUtils.blendARGB(bestRGB, fill, mixRatio);
-
+        // Step 7: normal icon with visible padding.
+        // Always return white here. The caller applies getWrapperBackgroundColor() (Palette
+        // dominant color forced to pref_coloredBackgroundLightness) when recolor is ON.
+        // This removes the old HSL-blend-toward-0xFF333333 path that produced deep-blue
+        // backgrounds on dark-logo apps like FDM, Hunter, and similar.
+        out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
         out.aWidth     = aWidth;
         out.aHeight    = aHeight;
         out.iconWidth  = width;
@@ -788,11 +723,15 @@ public class BaseIconFactory implements AutoCloseable {
      * Value object carrying the results of {@link #analyzeIconPixels}.
      */
     private static class AdaptiveIconAnalysis {
-        boolean isFullBleed      = false;
-        boolean fullBleedChecked = false;
-        boolean noMixinNeeded    = false;
-        int     backgroundColor  = DEFAULT_WRAPPER_BACKGROUND;
-        float   normalizerScale  = 1f;
+        boolean isFullBleed         = false;
+        boolean fullBleedChecked    = false;
+        boolean noMixinNeeded       = false;
+        // True when > TRANSPARENT_BACKGROUND_THRESHOLD of pixels are transparent.
+        // Indicates the icon is thin line-art on a transparent canvas — no natural
+        // background color can be extracted, so caller should use white.
+        boolean isMostlyTransparent = false;
+        int     backgroundColor     = DEFAULT_WRAPPER_BACKGROUND;
+        float   normalizerScale     = 1f;
         // Visible (non-padded) dimensions — used to compute per-type upscale factors.
         float   aWidth     = 0f;
         float   aHeight    = 0f;
@@ -839,68 +778,83 @@ public class BaseIconFactory implements AutoCloseable {
 
         if (shrinkNonAdaptiveIcons && !(icon instanceof AdaptiveIconDrawable)) {
             // ----------------------------------------------------------------
-            // NON-ADAPTIVE ICON PATH
+            // CASE 3 — LEGACY (non-adaptive) ICON
+            //
+            // Strategy:
+            //   a) Always run pixel analysis to detect fullBleed / noMixin and
+            //      determine the correct scale.
+            //   b) Background color decision (in priority order):
+            //        1. fullBleed / noMixin  → bestRGB from analysis (veryDark-guarded).
+            //                                  Icon fills the shape; background is only
+            //                                  visible at the corners of the mask.
+            //        2. mostlyTransparent    → white. Thin line-art has no usable bg color.
+            //        3. recolor ON           → Palette dominant color forced to
+            //                                  pref_coloredBackgroundLightness (default 1.0
+            //                                  = full white, lower values = tinted).
+            //                                  ColorNote → light yellow, etc.
+            //        4. default              → white.
+            //
+            // The old HSL-blend-toward-0xFF333333 path is completely removed.
+            // FDM (dark navy), Hunter (photo bg), and similar icons now correctly
+            // receive a white background instead of deep-blue / charcoal.
             // ----------------------------------------------------------------
 
-            if (colorizeBackground) {
-                // Full pixel analysis path.
-                AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
-                analyzeIconPixels(icon, analysis, true);
+            AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
+            analyzeIconPixels(icon, analysis);
 
-                FixedScaleDrawable foreground = new FixedScaleDrawable();
-                foreground.setDrawable(icon);
+            FixedScaleDrawable foreground = new FixedScaleDrawable();
+            foreground.setDrawable(icon);
 
-                if (analysis.isFullBleed || analysis.noMixinNeeded) {
-                    if (analysis.aWidth > 0 && analysis.aHeight > 0
-                            && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
-                        float upScale;
-                        if (analysis.noMixinNeeded) {
-                            upScale = Math.min(
-                                    analysis.iconWidth  / analysis.aWidth,
-                                    analysis.iconHeight / analysis.aHeight);
-                            foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
-                        } else {
-                            upScale = Math.max(
-                                    analysis.iconWidth  / analysis.aWidth,
-                                    analysis.iconHeight / analysis.aHeight);
-                            foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
-                        }
+            // --- Scale ---
+            if (analysis.isFullBleed || analysis.noMixinNeeded) {
+                if (analysis.aWidth > 0 && analysis.aHeight > 0
+                        && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
+                    float upScale;
+                    if (analysis.noMixinNeeded) {
+                        upScale = Math.min(
+                                analysis.iconWidth  / analysis.aWidth,
+                                analysis.iconHeight / analysis.aHeight);
+                        foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
                     } else {
-                        foreground.setScale(analysis.noMixinNeeded
-                                ? NO_MIXIN_ICON_SCALE
-                                : FULL_BLEED_ICON_SCALE);
+                        upScale = Math.max(
+                                analysis.iconWidth  / analysis.aWidth,
+                                analysis.iconHeight / analysis.aHeight);
+                        foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
                     }
                 } else {
-                    foreground.setScale(analysis.normalizerScale);
+                    foreground.setScale(analysis.noMixinNeeded
+                            ? NO_MIXIN_ICON_SCALE
+                            : FULL_BLEED_ICON_SCALE);
                 }
-
-                CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
-                        new ColorDrawable(analysis.backgroundColor),
-                        foreground);
-
-                scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
-                outScale[0] = scale;
-                return wrapper;
-
             } else {
-                // Simple Palette-based path (original behavior when colorize is off).
-                scale = new IconNormalizer(mIconBitmapSize).getScale(icon);
-
-                int wrapperBackgroundColor = IconPreferencesKt.getWrapperBackgroundColor(
-                        mContext, icon);
-
-                FixedScaleDrawable foreground = new FixedScaleDrawable();
-                foreground.setDrawable(icon);
-                foreground.setScale(scale);
-
-                CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
-                        new ColorDrawable(wrapperBackgroundColor),
-                        foreground);
-
-                scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
-                outScale[0] = scale;
-                return wrapper;
+                foreground.setScale(analysis.normalizerScale);
             }
+
+            // --- Background color ---
+            final int bgColor;
+            if (analysis.isFullBleed || analysis.noMixinNeeded) {
+                // Icon fills the shape mask — use pixel-derived dominant color.
+                // analysis.backgroundColor is already veryDark-guarded (falls back to white
+                // when the dominant color would be indistinguishable from the icon art).
+                bgColor = analysis.backgroundColor;
+            } else if (!analysis.isMostlyTransparent && colorizeBackground) {
+                // Normal icon with padding + recolor enabled:
+                // Use Palette dominant color forced to pref_coloredBackgroundLightness.
+                // At the default lightness of 1.0 this is still white; lowering it gives
+                // a softly tinted background matching the icon's dominant hue.
+                bgColor = IconPreferencesKt.getWrapperBackgroundColor(mContext, icon);
+            } else {
+                // Recolor disabled, or mostly-transparent icon — plain white.
+                bgColor = DEFAULT_WRAPPER_BACKGROUND;
+            }
+
+            CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
+                    new ColorDrawable(bgColor),
+                    foreground);
+
+            scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
+            outScale[0] = scale;
+            return wrapper;
 
         } else {
             // ----------------------------------------------------------------
@@ -930,35 +884,41 @@ public class BaseIconFactory implements AutoCloseable {
                     Drawable foreground = aid.getForeground();
 
                     if (isBackgroundTransparent(background) && foreground != null) {
-                        // Foreground-only adaptive icon — apply smart background.
-                        int newBg;
+                        // ----------------------------------------------------------------
+                        // CASE 2 — PARTIAL ADAPTIVE (foreground-only) ICON
+                        //
+                        // The developer provided only the foreground layer and expected the
+                        // launcher to supply a background. Most Google apps follow this pattern.
+                        //
+                        //   • recolor OFF → white background (DEFAULT_WRAPPER_BACKGROUND).
+                        //   • recolor ON  → Palette dominant color from the foreground layer
+                        //                   forced to pref_coloredBackgroundLightness.
+                        //                   At default lightness 1.0 this is still white;
+                        //                   lowering it gives a softly tinted background.
+                        //
+                        // We do NOT run analyzeIconPixels here — Palette is fast enough for
+                        // the partial-adaptive case and avoids an extra rasterization pass.
+                        // ----------------------------------------------------------------
+                        final int newBg;
                         if (treatWhiteAdaptive) {
-                            // Recolor: extract dominant color from the foreground layer.
-                            AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
-                            analyzeIconPixels(foreground, analysis, true);
-                            newBg = analysis.backgroundColor;
+                            newBg = IconPreferencesKt.getWrapperBackgroundColor(mContext, foreground);
                         } else {
-                            // Smart adaptive only, no recolor: use plain white.
                             newBg = DEFAULT_WRAPPER_BACKGROUND;
                         }
 
-                        // Apply the new background.
-                        // If the existing background is already a ColorDrawable (just transparent),
-                        // mutate it in place. Otherwise rebuild with a fresh ColorDrawable.
                         if (background instanceof ColorDrawable) {
                             AdaptiveIconDrawable mutated = (AdaptiveIconDrawable) aid.mutate();
                             ((ColorDrawable) mutated.getBackground()).setColor(newBg);
                             outScale[0] = ICON_VISIBLE_AREA_FACTOR;
                             return mutated;
                         } else {
-                            // background is null or non-ColorDrawable transparent drawable
                             CustomAdaptiveIconDrawable rebuilt = new CustomAdaptiveIconDrawable(
                                     new ColorDrawable(newBg), foreground);
                             outScale[0] = ICON_VISIBLE_AREA_FACTOR;
                             return rebuilt;
                         }
                     }
-                    // Background has real content — return untouched.
+                    // Real background → CASE 1: return completely untouched.
                 }
 
                 outScale[0] = ICON_VISIBLE_AREA_FACTOR;
