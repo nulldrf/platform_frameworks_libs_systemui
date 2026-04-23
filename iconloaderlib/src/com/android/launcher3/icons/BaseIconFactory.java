@@ -43,7 +43,6 @@ import androidx.annotation.ColorInt;
 import androidx.annotation.IntDef;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
-import androidx.core.graphics.ColorUtils;
 
 import com.android.launcher3.Flags;
 import com.android.launcher3.icons.BitmapInfo.Extender;
@@ -496,7 +495,9 @@ public class BaseIconFactory implements AutoCloseable {
      *      it has no natural background — mark isMostlyTransparent=true and use white.
      *      Caller decides the final color based on recolor preference.
      *   5. Build a posterized RGB histogram in the same pass to find dominant color.
-     *   6. For full-bleed / noMixin icons, use bestRGB (veryDark-guarded) as background.
+     *   6. For full-bleed / noMixin icons: backgroundColor = white (same as default).
+     *      bestRGB is tracked but only controls SCALE, never background color.
+     *      See the comment in normalizeAndWrapToAdaptiveIcon for the full rationale.
      *   7. For normal icons with padding, always return white. Caller applies
      *      getWrapperBackgroundColor() if recolor is enabled.
      *
@@ -688,18 +689,26 @@ public class BaseIconFactory implements AutoCloseable {
                 && almostSquarish
                 && (transparentScore <= noMixinScore);
 
+        // Background color is ALWAYS white for full-bleed and noMixin icons.
+        //
+        // Previous code used bestRGB here, reasoning that a color-matched background
+        // would look "seamless" at the shape-mask corners. In practice this produced the
+        // exact opposite effect: icons whose dominant pixel color is a strong hue
+        // (Mobile JKN = solid blue, Camera = red, LetsVPN = purple gradient) got a
+        // brightly-colored background that was clearly visible at the corners of circle
+        // or squircle shapes — what the user described as the "deep blue mask".
+        //
+        // The correct behavior (per the design spec) is:
+        //   "if the icon completely fills the canvas, don't do anything" — i.e. the
+        //   background is irrelevant for truly full-bleed icons because no gap is visible.
+        //   For icons with a tiny gap (noMixin), white is the safe universal default.
+        //
+        // bestRGB is still tracked in case callers need it in the future, but it is NOT
+        // written into out.backgroundColor. The background decision is left to the caller,
+        // which applies getWrapperBackgroundColor() (white forced to lightness 1.0 by
+        // default, or a tinted color when recolor is enabled).
         if (out.isFullBleed || out.noMixinNeeded) {
-            // For full-bleed / squarish-opaque icons the background is barely visible
-            // at the shape-mask corners. Use the dominant pixel color directly, but
-            // guard against very dark dominants (FDM-style dark navy) that would make
-            // corners indistinguishable from the icon content.
-            final float[] hsl = new float[3];
-            ColorUtils.colorToHSL(bestRGB, hsl);
-            final float lightness   = hsl[2];
-            final float saturation  = hsl[1];
-            final boolean veryDark  = (lightness < 0.35f)
-                    || (lightness < 0.50f && saturation < 0.15f);
-            out.backgroundColor = veryDark ? DEFAULT_WRAPPER_BACKGROUND : bestRGB;
+            out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
             out.aWidth     = aWidth;
             out.aHeight    = aHeight;
             out.iconWidth  = width;
@@ -707,11 +716,8 @@ public class BaseIconFactory implements AutoCloseable {
             return;
         }
 
-        // Step 7: normal icon with visible padding.
-        // Always return white here. The caller applies getWrapperBackgroundColor() (Palette
-        // dominant color forced to pref_coloredBackgroundLightness) when recolor is ON.
-        // This removes the old HSL-blend-toward-0xFF333333 path that produced deep-blue
-        // backgrounds on dark-logo apps like FDM, Hunter, and similar.
+        // Step 7: normal icon with visible padding — always white.
+        // Caller applies getWrapperBackgroundColor() when recolor is enabled.
         out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
         out.aWidth     = aWidth;
         out.aHeight    = aHeight;
@@ -831,20 +837,25 @@ public class BaseIconFactory implements AutoCloseable {
             }
 
             // --- Background color ---
+            //
+            // isFullBleed / noMixinNeeded affect SCALE only — never background color.
+            //
+            // The old approach used bestRGB for full-bleed/noMixin icons. This caused
+            // brightly-colored mask artifacts at shape corners for icons whose dominant
+            // color is strong: Mobile JKN (solid blue), Camera (red), LetsVPN (purple).
+            // In square mode those icons fill the entire canvas so no background is
+            // visible. In round/circle mode the area outside the circle should be white
+            // (matching the launcher surface), not the icon's hue.
+            //
+            // Rules:
+            //   1. mostlyTransparent  → white (thin line-art has no usable palette color)
+            //   2. recolor ON         → Palette dominant color at pref lightness
+            //                          (default 1.0 = white; lower value = soft tint)
+            //   3. default            → white
             final int bgColor;
-            if (analysis.isFullBleed || analysis.noMixinNeeded) {
-                // Icon fills the shape mask — use pixel-derived dominant color.
-                // analysis.backgroundColor is already veryDark-guarded (falls back to white
-                // when the dominant color would be indistinguishable from the icon art).
-                bgColor = analysis.backgroundColor;
-            } else if (!analysis.isMostlyTransparent && colorizeBackground) {
-                // Normal icon with padding + recolor enabled:
-                // Use Palette dominant color forced to pref_coloredBackgroundLightness.
-                // At the default lightness of 1.0 this is still white; lowering it gives
-                // a softly tinted background matching the icon's dominant hue.
+            if (!analysis.isMostlyTransparent && colorizeBackground) {
                 bgColor = IconPreferencesKt.getWrapperBackgroundColor(mContext, icon);
             } else {
-                // Recolor disabled, or mostly-transparent icon — plain white.
                 bgColor = DEFAULT_WRAPPER_BACKGROUND;
             }
 
@@ -1144,7 +1155,13 @@ public class BaseIconFactory implements AutoCloseable {
             return;
         }
         Bitmap shaderBitmap = getAdaptiveShaderBitmap(drawable);
-        Paint paint = new Paint();
+        // ANTI_ALIAS_FLAG is critical for smooth edges on round/squircle shapes.
+        // Without it, the path clip is computed with no sub-pixel blending, producing
+        // jagged staircase artifacts on curved masks — visually obvious on low-density
+        // screens (720p) and any shape that is not axis-aligned (circle, squircle, etc.).
+        // FILTER_BITMAP_FLAG enables bilinear filtering on the BitmapShader, which
+        // prevents blocky pixels when the shader bitmap is sampled at a non-integer scale.
+        Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         paint.setShader(new BitmapShader(shaderBitmap, TileMode.CLAMP, TileMode.CLAMP));
         canvas.drawPath(shapePath, paint);
     }
