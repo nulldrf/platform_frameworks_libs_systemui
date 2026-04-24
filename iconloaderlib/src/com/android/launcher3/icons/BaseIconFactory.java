@@ -786,86 +786,78 @@ public class BaseIconFactory implements AutoCloseable {
             // ----------------------------------------------------------------
             // CASE 3 — LEGACY (non-adaptive) ICON
             //
-            // Strategy:
-            //   a) Always run pixel analysis to detect fullBleed / noMixin and
-            //      determine the correct scale.
-            //   b) Background color decision (in priority order):
-            //        1. fullBleed / noMixin  → bestRGB from analysis (veryDark-guarded).
-            //                                  Icon fills the shape; background is only
-            //                                  visible at the corners of the mask.
-            //        2. mostlyTransparent    → white. Thin line-art has no usable bg color.
-            //        3. recolor ON           → Palette dominant color forced to
-            //                                  pref_coloredBackgroundLightness (default 1.0
-            //                                  = full white, lower values = tinted).
-            //                                  ColorNote → light yellow, etc.
-            //        4. default              → white.
+            // When Smart Backgrounds (colorizeBackground) is ON:
+            //   Run pixel analysis to detect fullBleed/noMixin for accurate scale
+            //   and use Palette for background color.
             //
-            // The old HSL-blend-toward-0xFF333333 path is completely removed.
-            // FDM (dark navy), Hunter (photo bg), and similar icons now correctly
-            // receive a white background instead of deep-blue / charcoal.
+            // When Smart Backgrounds is OFF:
+            //   Use the original simple path (normalizerScale + Palette background).
+            //   Do NOT run analyzeIconPixels — doing so changes scale for full-bleed
+            //   icons (Camera, LetsVPN, etc.) even though the user disabled the feature,
+            //   causing those icons to look different from stock Lawnchair behavior.
             // ----------------------------------------------------------------
 
-            AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
-            analyzeIconPixels(icon, analysis);
+            if (colorizeBackground) {
+                // --- Smart Backgrounds ON: full pixel analysis path ---
+                AdaptiveIconAnalysis analysis = new AdaptiveIconAnalysis();
+                analyzeIconPixels(icon, analysis);
 
-            FixedScaleDrawable foreground = new FixedScaleDrawable();
-            foreground.setDrawable(icon);
+                FixedScaleDrawable foreground = new FixedScaleDrawable();
+                foreground.setDrawable(icon);
 
-            // --- Scale ---
-            if (analysis.isFullBleed || analysis.noMixinNeeded) {
-                if (analysis.aWidth > 0 && analysis.aHeight > 0
-                        && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
-                    float upScale;
-                    if (analysis.noMixinNeeded) {
-                        upScale = Math.min(
-                                analysis.iconWidth  / analysis.aWidth,
-                                analysis.iconHeight / analysis.aHeight);
-                        foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
+                if (analysis.isFullBleed || analysis.noMixinNeeded) {
+                    if (analysis.aWidth > 0 && analysis.aHeight > 0
+                            && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
+                        float upScale;
+                        if (analysis.noMixinNeeded) {
+                            upScale = Math.min(
+                                    analysis.iconWidth  / analysis.aWidth,
+                                    analysis.iconHeight / analysis.aHeight);
+                            foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
+                        } else {
+                            upScale = Math.max(
+                                    analysis.iconWidth  / analysis.aWidth,
+                                    analysis.iconHeight / analysis.aHeight);
+                            foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
+                        }
                     } else {
-                        upScale = Math.max(
-                                analysis.iconWidth  / analysis.aWidth,
-                                analysis.iconHeight / analysis.aHeight);
-                        foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
+                        foreground.setScale(analysis.noMixinNeeded
+                                ? NO_MIXIN_ICON_SCALE
+                                : FULL_BLEED_ICON_SCALE);
                     }
                 } else {
-                    foreground.setScale(analysis.noMixinNeeded
-                            ? NO_MIXIN_ICON_SCALE
-                            : FULL_BLEED_ICON_SCALE);
+                    foreground.setScale(analysis.normalizerScale);
                 }
+
+                // Background: white unless recolor is on (Palette + lightness pref).
+                // isFullBleed/noMixin affect SCALE only, not background color.
+                final int bgColor = (!analysis.isMostlyTransparent)
+                        ? IconPreferencesKt.getWrapperBackgroundColor(mContext, icon)
+                        : DEFAULT_WRAPPER_BACKGROUND;
+
+                CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
+                        new ColorDrawable(bgColor), foreground);
+                scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
+                outScale[0] = scale;
+                return wrapper;
+
             } else {
-                foreground.setScale(analysis.normalizerScale);
+                // --- Smart Backgrounds OFF: original simple Palette path ---
+                scale = new IconNormalizer(mIconBitmapSize).getScale(icon);
+
+                int wrapperBackgroundColor = IconPreferencesKt.getWrapperBackgroundColor(
+                        mContext, icon);
+
+                FixedScaleDrawable foreground = new FixedScaleDrawable();
+                foreground.setDrawable(icon);
+                foreground.setScale(scale);
+
+                CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
+                        new ColorDrawable(wrapperBackgroundColor), foreground);
+                scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
+                outScale[0] = scale;
+                return wrapper;
             }
-
-            // --- Background color ---
-            //
-            // isFullBleed / noMixinNeeded affect SCALE only — never background color.
-            //
-            // The old approach used bestRGB for full-bleed/noMixin icons. This caused
-            // brightly-colored mask artifacts at shape corners for icons whose dominant
-            // color is strong: Mobile JKN (solid blue), Camera (red), LetsVPN (purple).
-            // In square mode those icons fill the entire canvas so no background is
-            // visible. In round/circle mode the area outside the circle should be white
-            // (matching the launcher surface), not the icon's hue.
-            //
-            // Rules:
-            //   1. mostlyTransparent  → white (thin line-art has no usable palette color)
-            //   2. recolor ON         → Palette dominant color at pref lightness
-            //                          (default 1.0 = white; lower value = soft tint)
-            //   3. default            → white
-            final int bgColor;
-            if (!analysis.isMostlyTransparent && colorizeBackground) {
-                bgColor = IconPreferencesKt.getWrapperBackgroundColor(mContext, icon);
-            } else {
-                bgColor = DEFAULT_WRAPPER_BACKGROUND;
-            }
-
-            CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
-                    new ColorDrawable(bgColor),
-                    foreground);
-
-            scale = new IconNormalizer(mIconBitmapSize).getScale(wrapper);
-            outScale[0] = scale;
-            return wrapper;
 
         } else {
             // ----------------------------------------------------------------
