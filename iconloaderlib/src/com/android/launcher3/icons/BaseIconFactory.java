@@ -829,11 +829,20 @@ public class BaseIconFactory implements AutoCloseable {
                     foreground.setScale(analysis.normalizerScale);
                 }
 
-                // Background: white unless recolor is on (Palette + lightness pref).
+                // Background: white/gray based on lightness when colorize is OFF.
+                // Colored (Palette + lightness) only when treatWhiteAdaptive is ON.
                 // isFullBleed/noMixin affect SCALE only, not background color.
-                final int bgColor = (!analysis.isMostlyTransparent)
-                        ? IconPreferencesKt.getWrapperBackgroundColor(mContext, icon)
-                        : DEFAULT_WRAPPER_BACKGROUND;
+                final int bgColor;
+                if (analysis.isMostlyTransparent) {
+                    bgColor = DEFAULT_WRAPPER_BACKGROUND;
+                } else if (treatWhiteAdaptive) {
+                    // Colorize ON: extract dominant color from icon, apply lightness pref.
+                    bgColor = IconPreferencesKt.getWrapperBackgroundColor(mContext, icon);
+                } else {
+                    // Colorize OFF: apply lightness to neutral white only (no hue from icon).
+                    // Lightness 100% = white, 50% = gray, 0% = black.
+                    bgColor = IconPreferencesKt.getMonochromeBackgroundColor(mContext);
+                }
 
                 CustomAdaptiveIconDrawable wrapper = new CustomAdaptiveIconDrawable(
                         new ColorDrawable(bgColor), foreground);
@@ -904,9 +913,12 @@ public class BaseIconFactory implements AutoCloseable {
                         // ----------------------------------------------------------------
                         final int newBg;
                         if (treatWhiteAdaptive) {
+                            // Colorize ON: Palette dominant color from foreground at lightness pref.
                             newBg = IconPreferencesKt.getWrapperBackgroundColor(mContext, foreground);
                         } else {
-                            newBg = DEFAULT_WRAPPER_BACKGROUND;
+                            // Colorize OFF: lightness-only gray/white, no hue from icon.
+                            // At default 100% lightness this is plain white.
+                            newBg = IconPreferencesKt.getMonochromeBackgroundColor(mContext);
                         }
 
                         if (background instanceof ColorDrawable) {

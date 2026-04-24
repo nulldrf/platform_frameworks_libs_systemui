@@ -124,8 +124,23 @@ fun getCustomAppNameForComponent(info: LauncherActivityInfo): CharSequence? {
 // -----------------------------------------------------------------------
 
 /**
+ * Returns a background color based solely on lightness — no color extracted from the icon.
+ *
+ * Used when "Smart icon backgrounds" is ON but "Colorize foreground-only" is OFF.
+ * The user expects the lightness slider to control brightness only (white → gray → black),
+ * not introduce any hue from the icon. At 100% (default) this returns white.
+ */
+fun getMonochromeBackgroundColor(context: Context): Int {
+    val lightness = context.prefs.getFloat("pref_coloredBackgroundLightness", 1f)
+    if (lightness >= 1f) return DEFAULT_WRAPPER_BACKGROUND
+    val outHsl = floatArrayOf(0f, 0f, lightness)
+    return ColorUtils.HSLToColor(outHsl)
+}
+
+/**
  * Returns a background color for the given icon using the Palette API.
- * This is the simple path used when [shouldColorizeBackground] is false.
+ * This is the colorized path used when [shouldColorizeBackground] AND
+ * [shouldTreatWhiteAdaptive] are both true.
  *
  * The dominant color is extracted and then its lightness is forced to the value stored in
  * pref_coloredBackgroundLightness (default 1.0 = full white). At 100% lightness every dominant
