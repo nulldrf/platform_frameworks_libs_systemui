@@ -851,11 +851,15 @@ public class BaseIconFactory implements AutoCloseable {
                 return wrapper;
 
             } else {
-                // --- Smart Backgrounds OFF: original simple Palette path ---
+                // --- Smart Backgrounds OFF: simple path ---
+                // Background is monochrome (black→gray→white via lightness slider).
+                // Do NOT call getWrapperBackgroundColor here — that extracts the icon's
+                // dominant color from Palette, which is exactly the "coloring without
+                // enabling colorize" bug. When both Smart Backgrounds and Colorize are OFF,
+                // the slider should only control brightness, not hue.
                 scale = new IconNormalizer(mIconBitmapSize).getScale(icon);
 
-                int wrapperBackgroundColor = IconPreferencesKt.getWrapperBackgroundColor(
-                        mContext, icon);
+                int wrapperBackgroundColor = IconPreferencesKt.getMonochromeBackgroundColor(mContext);
 
                 FixedScaleDrawable foreground = new FixedScaleDrawable();
                 foreground.setDrawable(icon);
@@ -1016,13 +1020,18 @@ public class BaseIconFactory implements AutoCloseable {
     }
 
     /**
-     * Wraps the provided icon in an adaptive icon drawable
+     * Wraps the provided icon in an adaptive icon drawable.
+     * Called when shouldWrapAdaptive is ON but colorizeBackground is OFF.
+     * Background is always monochrome (lightness only, no icon color) in this path.
      */
     public AdaptiveIconDrawable wrapToAdaptiveIcon(@NonNull Drawable icon) {
         if (icon instanceof AdaptiveIconDrawable aid) {
             return aid;
         } else {
-            int wrapperBackgroundColor = IconPreferencesKt.getWrapperBackgroundColor(mContext, icon);
+            // Monochrome background: black→gray→white based on lightness pref only.
+            // getWrapperBackgroundColor would extract icon's Palette color here, which
+            // is wrong when colorize is OFF — the user only wants grayscale.
+            int wrapperBackgroundColor = IconPreferencesKt.getMonochromeBackgroundColor(mContext);
 
             float scale = new IconNormalizer(mIconBitmapSize).getScale(icon);
             CustomAdaptiveIconDrawable dr = new CustomAdaptiveIconDrawable(
