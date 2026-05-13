@@ -81,7 +81,40 @@ constructor(
 
     private val cache: MutableMap<ComponentKey, CacheEntry?> =
         if (inMemoryCache) {
-            HashMap(INITIAL_ICON_CACHE_CAPACITY)
+            // Bounded LRU cache to prevent unbounded native heap and GPU memory growth.
+            //
+            // Previously this was a plain HashMap with no eviction policy. Every icon loaded
+            // into the cache — one BitmapInfo per installed app — stayed in memory forever.
+            // Each BitmapInfo holds a Bitmap: on Android 8+ non-hardware bitmaps are backed
+            // by native heap (via Skia), and hardware bitmaps (Config.HARDWARE, loaded from
+            // the icon DB) occupy GPU memory (visible as GL mtrack in meminfo). With 200+
+            // installed apps all opened through All Apps, the cache could grow to 30–100 MB
+            // of native + GPU memory with no upper bound.
+            //
+            // LinkedHashMap in access-order mode provides LRU semantics: the least-recently-
+            // accessed entry is at the head. removeEldestEntry() is called after each put(),
+            // so the cache trims itself to MAX_ICON_CACHE_ENTRIES automatically. Evicted
+            // entries lose their only strong reference from the cache; their backing Bitmaps
+            // become eligible for GC, which frees native and GPU memory.
+            //
+            // On a cache miss the caller falls through to getEntryFromDBLocked(), so eviction
+            // is safe — it adds a DB read but does not lose data.
+            //
+            // It is NOT safe to call Bitmap.recycle() in removeEldestEntry() because callers
+            // hold references to CacheEntry.bitmap beyond the synchronized block (e.g. after
+            // applyCacheEntry() copies the reference to ItemInfoWithIcon.bitmap). Recycling
+            // there would cause crashes. Instead we rely on GC to free the native/GPU memory
+            // once the last reference is dropped, which happens quickly once evicted entries
+            // are no longer reachable.
+            object : LinkedHashMap<ComponentKey, CacheEntry?>(
+                INITIAL_ICON_CACHE_CAPACITY,
+                0.75f,
+                /* accessOrder = */ true,
+            ) {
+                override fun removeEldestEntry(
+                    eldest: MutableMap.MutableEntry<ComponentKey, CacheEntry?>,
+                ): Boolean = size > MAX_ICON_CACHE_ENTRIES
+            }
         } else {
             object : AbstractMutableMap<ComponentKey, CacheEntry?>() {
                 override fun put(key: ComponentKey, value: CacheEntry?): CacheEntry? = value
@@ -656,6 +689,22 @@ constructor(
         private const val DEBUG = false
 
         private const val INITIAL_ICON_CACHE_CAPACITY = 50
+
+        // Maximum number of entries kept in the in-memory LRU icon cache.
+        //
+        // Sizing rationale:
+        //   Home screen icons (typical):       ~50
+        //   All Apps visible page (~8 cols):   ~48 per page, typically 2 pages scrolled = ~96
+        //   Shortcuts + widgets + badges:      ~30
+        //   Prefetch buffer:                   ~24
+        //                                      ─────
+        //   Total:                             ~200
+        //
+        // At 192×192 px ARGB_8888 (~147 KB/icon) this cap limits bitmap memory to ~29 MB,
+        // vs the previous unbounded growth that reached 100 MB+ on devices with many apps.
+        // The value can be tuned up for high-RAM devices if All Apps scroll jank is observed
+        // from DB re-reads on cache misses.
+        private const val MAX_ICON_CACHE_ENTRIES = 200
 
         // A format string which returns the original string as is.
         private const val IDENTITY_FORMAT_STRING = "%1\$s"
