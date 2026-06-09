@@ -765,6 +765,16 @@ public class BaseIconFactory implements AutoCloseable {
         // those are always returned untouched regardless of this flag.
         boolean treatWhiteAdaptive = colorizeBackground && IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
 
+        // colorizeIconPack: when ON, third-party icon pack icons that land on Case 2
+        // (transparent-bg adaptive) or Case 3 (legacy PNG) receive smart backgrounds.
+        // Case 1 (full adaptive with real background) is always left untouched.
+        boolean colorizeIconPack = colorizeBackground
+                && IconPreferencesKt.shouldColorizeIconPackBackground(mContext);
+        // Allows legacy (non-adaptive) icon pack icons to enter the wrapping block even
+        // when the user has global auto-adaptive wrapping disabled.
+        boolean processIconPackLegacy = IconProvider.ATLEAST_OREO
+                && isFromIconPack && colorizeIconPack;
+
         float scale;
 
         // ----------------------------------------------------------------
@@ -782,7 +792,7 @@ public class BaseIconFactory implements AutoCloseable {
             }
         }
 
-        if (shrinkNonAdaptiveIcons && !(icon instanceof AdaptiveIconDrawable)) {
+        if ((shrinkNonAdaptiveIcons || processIconPackLegacy) && !(icon instanceof AdaptiveIconDrawable)) {
             // ----------------------------------------------------------------
             // CASE 3 — LEGACY (non-adaptive) ICON
             //
@@ -795,6 +805,9 @@ public class BaseIconFactory implements AutoCloseable {
             //   Do NOT run analyzeIconPixels — doing so changes scale for full-bleed
             //   icons (Camera, LetsVPN, etc.) even though the user disabled the feature,
             //   causing those icons to look different from stock Lawnchair behavior.
+            //
+            // processIconPackLegacy: when "Apply smart backgrounds to icon pack" is ON,
+            //   icon pack legacy PNG icons are processed here too.
             // ----------------------------------------------------------------
 
             if (colorizeBackground) {
@@ -877,7 +890,10 @@ public class BaseIconFactory implements AutoCloseable {
             // ADAPTIVE ICON PATH (or wrapping disabled)
             // ----------------------------------------------------------------
             if (icon instanceof AdaptiveIconDrawable aid) {
-                if (colorizeBackground) {
+                // For icon pack adaptive icons: only colorize Case 2 (transparent bg)
+                // when "Apply smart backgrounds to icon pack" is also ON.
+                // When OFF, icon pack adaptive icons are returned completely as-is.
+                if (colorizeBackground && (!isFromIconPack || colorizeIconPack)) {
                     // RULE (per Android adaptive icon spec):
                     //
                     // An adaptive icon has two layers:

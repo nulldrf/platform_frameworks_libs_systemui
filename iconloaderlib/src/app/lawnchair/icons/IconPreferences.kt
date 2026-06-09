@@ -81,6 +81,18 @@ fun Context.shouldColorizeBackground(): Boolean =
 fun Context.shouldTreatWhiteAdaptive(): Boolean =
     prefs.getBoolean("pref_enableWhiteOnlyTreatment", false)
 
+/**
+ * Whether to apply smart adaptive backgrounds to third-party icon pack icons
+ * that land on Case 2 (transparent-background adaptive) or Case 3 (legacy PNG).
+ *
+ * Case 1 (full adaptive with real background) is always left untouched.
+ * Only meaningful when [shouldColorizeBackground] is also true.
+ *
+ * Default: false
+ */
+fun Context.shouldColorizeIconPackBackground(): Boolean =
+    prefs.getBoolean("pref_colorizeIconPackBackground", false)
+
 // -----------------------------------------------------------------------
 // Custom app name map
 // -----------------------------------------------------------------------

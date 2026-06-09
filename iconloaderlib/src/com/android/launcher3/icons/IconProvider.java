@@ -310,7 +310,7 @@ public class IconProvider {
      *       Case 3 (legacy) always uses white or Palette+lightness; no more deep-blue FDM/Hunter;
      *       Case 2 (partial adaptive) uses getWrapperBackgroundColor for recolor
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 5;
+    private static final int LAWNCHAIR_RENDER_VERSION = 6;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.
@@ -334,17 +334,19 @@ public class IconProvider {
                 + "," + Build.VERSION.SDK_INT;
 
         // Append adaptive icon pref values so any change invalidates the disk cache.
-        // We use a compact encoding: "w" = wrapAdaptive, "c" = colorize, "t" = treatWhite.
-        // Each is 1 (enabled) or 0 (disabled). Example: "w1c1t0"
-        boolean wrapAdaptive    = IconPreferencesKt.shouldWrapAdaptive(mContext);
-        boolean colorize        = IconPreferencesKt.shouldColorizeBackground(mContext);
-        boolean treatWhite      = IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
+        // We use a compact encoding: "w" = wrapAdaptive, "c" = colorize, "t" = treatWhite,
+        // "i" = colorizeIconPack. Each is 1 (enabled) or 0 (disabled). Example: "w1c1t0i0"
+        boolean wrapAdaptive      = IconPreferencesKt.shouldWrapAdaptive(mContext);
+        boolean colorize          = IconPreferencesKt.shouldColorizeBackground(mContext);
+        boolean treatWhite        = IconPreferencesKt.shouldTreatWhiteAdaptive(mContext);
+        boolean colorizeIconPack  = IconPreferencesKt.shouldColorizeIconPackBackground(mContext);
 
         mSystemState = baseState
                 + SYSTEM_STATE_SEPARATOR
-                + "w" + (wrapAdaptive ? "1" : "0")
-                + "c" + (colorize    ? "1" : "0")
-                + "t" + (treatWhite  ? "1" : "0")
+                + "w" + (wrapAdaptive     ? "1" : "0")
+                + "c" + (colorize         ? "1" : "0")
+                + "t" + (treatWhite       ? "1" : "0")
+                + "i" + (colorizeIconPack ? "1" : "0")
                 + "r" + LAWNCHAIR_RENDER_VERSION;
     }
 
