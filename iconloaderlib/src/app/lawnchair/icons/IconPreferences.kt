@@ -152,9 +152,6 @@ fun getMonochromeBackgroundColor(context: Context): Int {
  * color becomes white, which is the original behavior.
  */
 fun getWrapperBackgroundColor(context: Context, icon: Drawable): Int {
-    if (context.shouldTransparentBGIcons()) {
-        return Color.TRANSPARENT
-    }
     val lightness = context.prefs.getFloat("pref_coloredBackgroundLightness", 1f)
     val palette = Palette.Builder(drawableToBitmap(icon)).generate()
     val dominantColor = palette.getDominantColor(DEFAULT_WRAPPER_BACKGROUND)
