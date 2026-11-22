@@ -156,11 +156,11 @@ public class IconProvider {
         }
         if (icon == null) {
             icon = loadPackageIconWithFallback(info, appInfo, iconDpi);
-            if (ATLEAST_T && icon instanceof AdaptiveIconDrawable && td != null) {
+            if (icon instanceof AdaptiveIconDrawable && td != null) {
                 CustomAdaptiveIconDrawable aid = (CustomAdaptiveIconDrawable) CustomAdaptiveIconDrawable.wrapNonNull(
                     icon
                 );
-                if  (aid.getMonochrome() == null) {
+                if (aid.getMonochrome() == null) {
                     icon = new CustomAdaptiveIconDrawable(aid.getBackground(),
                             aid.getForeground(), td.loadPaddedDrawable());
                 }
@@ -312,8 +312,10 @@ public class IconProvider {
      *   7 — fix legacy no-mixin/full-bleed scaling (1.45f + max upscale), visible-bounds
      *       centering in FixedScaleDrawable, symmetric squarishness check, odd-size layer bounds
      *       centering in CustomAdaptiveIconDrawable, and PorterDuff.Mode.CLEAR on reused bitmaps
+     *   8 — cap non-adaptive/icon-pack visible span at ICON_VISIBLE_AREA_FACTOR (0.92f) and
+     *       separate monochrome themed layer from colored custom icon pack base icon
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 7;
+    private static final int LAWNCHAIR_RENDER_VERSION = 8;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.

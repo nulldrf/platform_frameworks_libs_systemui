@@ -277,15 +277,34 @@ public class BaseIconFactory implements AutoCloseable {
 
         if (adaptiveIcon instanceof Extender extender) {
             info = extender.getExtendedInfo(bitmap, color, this, scale[0]);
-        } else if (IconProvider.ATLEAST_T && mThemeController != null && adaptiveIcon instanceof AdaptiveIconDrawable aid) {
-            info.setThemedBitmap(
-                    mThemeController.createThemedBitmap(
-                        aid,
-                        info,
-                        this,
-                        options == null ? null : options.mSourceHint
-                    )
-            );
+        } else if (mThemeController != null) {
+            Drawable themedSource = adaptiveIcon;
+            if (tempIcon instanceof app.lawnchair.icons.MonochromeDrawableProvider provider) {
+                Drawable mono = provider.getMonochromeDrawable();
+                if (mono != null) {
+                    themedSource = new CustomAdaptiveIconDrawable(
+                            new ColorDrawable(Color.TRANSPARENT),
+                            new ColorDrawable(Color.TRANSPARENT),
+                            mono);
+                }
+            }
+            if (!(themedSource instanceof AdaptiveIconDrawable)
+                    && IconPreferencesKt.shouldForceMonochrome(mContext)) {
+                // Allow forced monochrome generation for non-adaptive icon pack PNGs without
+                // altering the unthemed colored icon stored in info.icon.
+                themedSource = wrapToAdaptiveIcon(adaptiveIcon);
+            }
+            if (themedSource instanceof AdaptiveIconDrawable aid
+                    && (IconProvider.ATLEAST_T || themedSource instanceof CustomAdaptiveIconDrawable)) {
+                info.setThemedBitmap(
+                        mThemeController.createThemedBitmap(
+                            aid,
+                            info,
+                            this,
+                            options == null ? null : options.mSourceHint
+                        )
+                );
+            }
         }
         FlagOp flagOp = getBitmapFlagOp(options);
         if (adaptiveIcon instanceof WrappedAdaptiveIcon) {
