@@ -186,7 +186,20 @@ public class IconNormalizer {
 
         // Area of the rectangle required to fit the convex hull
         float rectArea = (bottomY + 1 - topY) * (rightX + 1 - leftX);
-        return getScale(area, rectArea, width * height);
+        float scale = getScale(area, rectArea, width * height);
+
+        // Cap scale so the visible icon span never exceeds ICON_VISIBLE_AREA_FACTOR (0.92f).
+        // Without this cap, irregular/cutout/outlined PNGs whose convex-hull area is below
+        // scaleRequired receive scale = 1.0f and draw edge-to-edge (100%), appearing noticeably
+        // oversized next to adaptive icons (92%) on the home screen, drawer, and folders.
+        float visibleWidthFraction = (float) (rightX + 1 - leftX) / width;
+        float visibleHeightFraction = (float) (bottomY + 1 - topY) / height;
+        float maxVisibleFraction = Math.max(visibleWidthFraction, visibleHeightFraction);
+        if (maxVisibleFraction > ICON_VISIBLE_AREA_FACTOR) {
+            float maxAllowedScale = ICON_VISIBLE_AREA_FACTOR / maxVisibleFraction;
+            scale = Math.min(scale, maxAllowedScale);
+        }
+        return scale;
     }
 
     /**

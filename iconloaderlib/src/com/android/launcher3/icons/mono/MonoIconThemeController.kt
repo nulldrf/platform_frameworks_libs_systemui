@@ -92,7 +92,11 @@ class MonoIconThemeController(
         isFileDrawable: Boolean,
         shouldForceThemeIcon: Boolean,
     ): Drawable? {
-        val mono = base.monochrome
+        val mono = when {
+            base is app.lawnchair.icons.CustomAdaptiveIconDrawable -> base.monochrome
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> base.monochrome
+            else -> null
+        }
         if (mono != null) {
             return ClippedMonoDrawable(mono, shapePath)
         }
@@ -129,7 +133,12 @@ class MonoIconThemeController(
     ): AdaptiveIconDrawable {
         val colors = colorProvider(context)
         originalIcon.mutate()
-        var monoDrawable = originalIcon.monochrome?.apply { setTint(colors[1]) }
+        val existingMono = when {
+            originalIcon is app.lawnchair.icons.CustomAdaptiveIconDrawable -> originalIcon.monochrome
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU -> originalIcon.monochrome
+            else -> null
+        }
+        var monoDrawable = existingMono?.apply { setTint(colors[1]) }
 
         if (monoDrawable == null) {
             info?.themedBitmap?.let { themedBitmap ->
@@ -153,7 +162,8 @@ class MonoIconThemeController(
                     monoDrawable =
                         InsetDrawable(
                             BitmapDrawable(drawableBitmap).apply {
-                                colorFilter = BlendModeColorFilter(colors[1], SRC_IN)
+                                colorFilter = androidx.core.graphics.BlendModeColorFilterCompat
+                                    .createBlendModeColorFilterCompat(colors[1], androidx.core.graphics.BlendModeCompat.SRC_IN)
                             },
                             AdaptiveIconDrawable.getExtraInsetFraction() / 2,
                         )
