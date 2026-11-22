@@ -5,6 +5,7 @@ import static com.android.launcher3.icons.BaseIconFactory.LEGACY_ICON_SCALE;
 import android.content.res.Resources;
 import android.content.res.Resources.Theme;
 import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.DrawableWrapper;
 import android.util.AttributeSet;
@@ -17,6 +18,7 @@ import org.xmlpull.v1.XmlPullParser;
 public class FixedScaleDrawable extends DrawableWrapper {
 
     private float mScaleX, mScaleY;
+    private float mOffsetX, mOffsetY;
 
     public FixedScaleDrawable() {
         super(new ColorDrawable());
@@ -27,8 +29,12 @@ public class FixedScaleDrawable extends DrawableWrapper {
     @Override
     public void draw(Canvas canvas) {
         int saveCount = canvas.save();
+        Rect bounds = getBounds();
         canvas.scale(mScaleX, mScaleY,
-                getBounds().exactCenterX(), getBounds().exactCenterY());
+                bounds.exactCenterX(), bounds.exactCenterY());
+        if (mOffsetX != 0f || mOffsetY != 0f) {
+            canvas.translate(mOffsetX * bounds.width(), mOffsetY * bounds.height());
+        }
         super.draw(canvas);
         canvas.restoreToCount(saveCount);
     }
@@ -49,5 +55,14 @@ public class FixedScaleDrawable extends DrawableWrapper {
         } else if (w > h && h > 0) {
             mScaleY *= h / w;
         }
+    }
+
+    /**
+     * Sets a normalized translation offset (in fractions of drawable width/height) applied before
+     * scaling so off-center visible icon content is centered within the mask viewport.
+     */
+    public void setOffset(float offsetX, float offsetY) {
+        mOffsetX = offsetX;
+        mOffsetY = offsetY;
     }
 }
