@@ -31,6 +31,7 @@ import android.graphics.Outline;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Region;
 import android.graphics.Shader;
@@ -351,8 +352,16 @@ public class CustomAdaptiveIconDrawable extends AdaptiveIconDrawable implements 
      * Set the child layer bounds bigger than the view port size by {@link #DEFAULT_VIEW_PORT_SCALE}
      */
     private void updateLayerBoundsInternal(Rect bounds) {
-        int cX = bounds.width() / 2;
-        int cY = bounds.height() / 2;
+        float cX = bounds.width() / 2f;
+        float cY = bounds.height() / 2f;
+        float halfWidth = bounds.width() / (DEFAULT_VIEW_PORT_SCALE * 2f);
+        float halfHeight = bounds.height() / (DEFAULT_VIEW_PORT_SCALE * 2f);
+        final Rect outRect = mTmpOutRect;
+        outRect.set(
+                (int) Math.floor(cX - halfWidth),
+                (int) Math.floor(cY - halfHeight),
+                (int) Math.ceil(cX + halfWidth),
+                (int) Math.ceil(cY + halfHeight));
 
         for (int i = 0, count = mLayerState.N_CHILDREN; i < count; i++) {
             final ChildDrawable r = mLayerState.mChildren[i];
@@ -360,11 +369,6 @@ public class CustomAdaptiveIconDrawable extends AdaptiveIconDrawable implements 
             if (d == null) {
                 continue;
             }
-
-            int insetWidth = (int) (bounds.width() / (DEFAULT_VIEW_PORT_SCALE * 2));
-            int insetHeight = (int) (bounds.height() / (DEFAULT_VIEW_PORT_SCALE * 2));
-            final Rect outRect = mTmpOutRect;
-            outRect.set(cX - insetWidth, cY - insetHeight, cX + insetWidth, cY + insetHeight);
 
             d.setBounds(outRect);
         }
@@ -396,7 +400,8 @@ public class CustomAdaptiveIconDrawable extends AdaptiveIconDrawable implements 
         if (mLayersShader == null) {
             mCanvas.setBitmap(mLayersBitmap);
 
-            // Fill with TRANSPARENT instead of BLACK.
+            // Clear with PorterDuff.Mode.CLEAR so reused mLayersBitmap pixels from prior renders
+            // are actually erased (default SRC_OVER with TRANSPARENT is a no-op).
             //
             // The adaptive icon spec reserves an extra 18dp inset on each side (the
             // "extra inset" zone) for parallax/animation effects. Child layers are only
@@ -404,10 +409,10 @@ public class CustomAdaptiveIconDrawable extends AdaptiveIconDrawable implements 
             // mask extends into that extra-inset zone (e.g. the pointed corner of a
             // teardrop), the BitmapShader samples pixels from the region where no child
             // layer has drawn anything. Filling with BLACK made those sampled pixels black,
-            // producing a clearly visible black corner artifact. Filling with TRANSPARENT
+            // producing a clearly visible black corner artifact. Clearing to TRANSPARENT
             // (0x00000000) lets those pixels remain transparent so the launcher's
             // background surface shows through cleanly instead.
-            mCanvas.drawColor(Color.TRANSPARENT);
+            mCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
 
             if (mLayerState.mChildren[BACKGROUND_ID].mDrawable != null) {
                 mLayerState.mChildren[BACKGROUND_ID].mDrawable.draw(mCanvas);

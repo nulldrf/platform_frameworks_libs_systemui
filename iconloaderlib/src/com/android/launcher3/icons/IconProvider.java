@@ -309,8 +309,11 @@ public class IconProvider {
      *   5 — simplified background logic: HSL-blend-toward-0xFF333333 removed entirely;
      *       Case 3 (legacy) always uses white or Palette+lightness; no more deep-blue FDM/Hunter;
      *       Case 2 (partial adaptive) uses getWrapperBackgroundColor for recolor
+     *   7 — fix legacy no-mixin/full-bleed scaling (1.45f + max upscale), visible-bounds
+     *       centering in FixedScaleDrawable, symmetric squarishness check, odd-size layer bounds
+     *       centering in CustomAdaptiveIconDrawable, and PorterDuff.Mode.CLEAR on reused bitmaps
      */
-    private static final int LAWNCHAIR_RENDER_VERSION = 6;
+    private static final int LAWNCHAIR_RENDER_VERSION = 7;
 
     /**
      * Refreshes the system state definition used to check the validity of an app icon.

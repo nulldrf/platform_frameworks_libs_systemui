@@ -27,6 +27,7 @@ import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.PaintFlagsDrawFilter;
 import android.graphics.Path;
+import android.graphics.PorterDuff;
 import android.graphics.Rect;
 import android.graphics.Shader.TileMode;
 import android.graphics.drawable.AdaptiveIconDrawable;
@@ -84,11 +85,16 @@ public class BaseIconFactory implements AutoCloseable {
 
     private static final int NUMBER_OF_COLORS_GUESSTIMATION = 45;
 
-    // Scale applied when an icon fills its entire bounds with no transparent padding.
-    private static final float FULL_BLEED_ICON_SCALE = 1.44f;
+    // Net scale inside the adaptive mask viewport is 0.7f * scale (1.5x layer bounds *
+    // LEGACY_ICON_SCALE). Using 1.45f maps the visible bounds to 101.5% of the mask viewport
+    // (~0.75% bleed per side), preventing edge gaps from anti-aliasing or sub-pixel rounding
+    // while keeping artwork framing intact.
+    private static final float FULL_BLEED_ICON_SCALE = 1.45f;
 
-    // Scale applied when an icon is squarish and opaque enough to skip color mixing.
-    private static final float NO_MIXIN_ICON_SCALE = 1.40f;
+    // Scale applied when an icon is squarish and opaque enough to fill the mask without a
+    // background mix-in (e.g. One UI squircles, rounded squares, circles). Previously 1.40f
+    // mapped to 98% of the mask viewport, guaranteeing visible background gaps even on Circle.
+    private static final float NO_MIXIN_ICON_SCALE = 1.45f;
 
     // Icons with this many unique posterized colors or fewer are treated as "single color".
     private static final int SINGLE_COLOR_LIMIT = 5;
@@ -354,18 +360,16 @@ public class BaseIconFactory implements AutoCloseable {
     private Bitmap getAdaptiveShaderBitmap(AdaptiveIconDrawable adaptiveIcon) {
         Rect bounds = adaptiveIcon.getBounds();
         int iconWidth = bounds.width();
-        int iconHeight = bounds.width();
+        int iconHeight = bounds.height();
 
         BitmapRenderer shaderRenderer = new BitmapRenderer() {
             @Override
             public void draw(Canvas canvas) {
                 canvas.translate(-bounds.left, -bounds.top);
-                // Fill with TRANSPARENT instead of BLACK so that areas outside the
-                // child layers (the extra-inset zone used for parallax/animation effects)
-                // are transparent rather than black. This prevents black corner artifacts
-                // when the user's chosen icon shape (e.g. teardrop) clips into that zone.
+                // Clear with PorterDuff.Mode.CLEAR so reused mShaderBitmap pixels from prior
+                // icons are actually erased (default SRC_OVER with TRANSPARENT is a no-op).
                 // Matches the same fix applied to CustomAdaptiveIconDrawable.draw().
-                canvas.drawColor(Color.TRANSPARENT);
+                canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
                 if (adaptiveIcon.getBackground() != null) {
                     adaptiveIcon.getBackground().draw(canvas);
                 }
@@ -607,10 +611,17 @@ public class BaseIconFactory implements AutoCloseable {
         final float aWidth  = bRight  - bLeft   + 1;
         final float aHeight = bBottom - bTop    + 1;
 
-        // Squarishness check — matches old AdaptiveIconGenerator exactly.
+        // Visible bounding-box center offset (normalized fraction of drawable dimensions)
+        // so FixedScaleDrawable centers asymmetric icons (e.g. icons with drop shadows or
+        // uneven padding) inside the mask viewport instead of around the raw canvas center.
+        out.offsetX = 0.5f - (bLeft + bRight + 1f) / (2f * width);
+        out.offsetY = 0.5f - (bTop + bBottom + 1f) / (2f * height);
+
+        // Symmetric squarishness check (previous upper bound 1.005f rejected icons even
+        // 1px taller than wide, causing them to drop out of noMixinNeeded and shrink).
         final float ratio            = aHeight / aWidth;
-        final boolean isSquareish    = ratio > 0.999f && ratio < 1.0001f;
-        final boolean almostSquarish = isSquareish || (ratio > 0.97f && ratio < 1.005f);
+        final boolean isSquareish    = ratio > 0.99f && ratio < 1.01f;
+        final boolean almostSquarish = isSquareish || (ratio > 0.96f && ratio < 1.04f);
 
         if (!isSquareish && !out.fullBleedChecked) {
             out.isFullBleed      = false;
@@ -632,8 +643,11 @@ public class BaseIconFactory implements AutoCloseable {
               + fracBottom * height * width;
         final int addPixels = Math.round(paddingPixels);
 
-        final int maxTransparent = (int) (Math.round(totalPixels * 0.10f) + addPixels);
-        final int noMixinScore   = (int) (Math.round(totalPixels * 0.27f) + addPixels);
+        // Measure interior transparency against the visible bounding-box area (aWidth * aHeight)
+        // rather than totalPixels so outer transparent padding doesn't distort the corner ratio.
+        final float visibleArea  = aWidth * aHeight;
+        final int maxTransparent = Math.round(visibleArea * 0.10f) + addPixels;
+        final int noMixinScore   = Math.round(visibleArea * 0.27f) + addPixels;
 
         // Step 4: single-pass scan — transparency count + RGB histogram.
         SparseIntArray rgbScoreHistogram = new SparseIntArray(NUMBER_OF_COLORS_GUESSTIMATION);
@@ -666,29 +680,20 @@ public class BaseIconFactory implements AutoCloseable {
         // Restore full alpha on the winning color.
         bestRGB |= 0xFF << 24;
 
+        // Require the visible shape to span at least half the canvas on both axes before
+        // treating it as full-bleed / no-mixin, preventing tiny centered symbols from over-zooming
+        // while still handling padded squircles/circles (e.g. 72dp icons inside a 108dp canvas).
+        final boolean hasSubstantialBounds = aWidth >= width * 0.5f && aHeight >= height * 0.5f;
+
         // If fullBleed was never definitively set to false, the icon must be full bleed.
         if (!out.fullBleedChecked) {
-            out.isFullBleed = true;
+            out.isFullBleed = hasSubstantialBounds;
         }
 
-        // Step 5: transparent-background guard.
-        // If the majority of pixels are transparent, the icon is foreground art on a
-        // transparent canvas. Mark it so the caller can decide the background (white).
-        // We do NOT attempt to extract a representative color from thin strokes because
-        // that produces wrong tints (deep-blue on Apktool M, dark tints on Google icons).
-        final float transparentFraction = (float) transparentScore / totalPixels;
-        if (transparentFraction > TRANSPARENT_BACKGROUND_THRESHOLD) {
-            out.isMostlyTransparent = true;
-            out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
-            out.aWidth     = aWidth;
-            out.aHeight    = aHeight;
-            out.iconWidth  = width;
-            out.iconHeight = height;
-            return;
-        }
-
-        // Step 6: no-mixin shortcut.
+        // Step 5: no-mixin shortcut (evaluated before the overall transparent-fraction guard so
+        // solid padded squircles/circles aren't misclassified as thin transparent line-art).
         out.noMixinNeeded = !out.isFullBleed
+                && hasSubstantialBounds
                 && almostSquarish
                 && (transparentScore <= noMixinScore);
 
@@ -711,6 +716,22 @@ public class BaseIconFactory implements AutoCloseable {
         // which applies getWrapperBackgroundColor() (white forced to lightness 1.0 by
         // default, or a tinted color when recolor is enabled).
         if (out.isFullBleed || out.noMixinNeeded) {
+            out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
+            out.aWidth     = aWidth;
+            out.aHeight    = aHeight;
+            out.iconWidth  = width;
+            out.iconHeight = height;
+            return;
+        }
+
+        // Step 6: transparent-background guard.
+        // If the majority of pixels are transparent, the icon is foreground art on a
+        // transparent canvas. Mark it so the caller can decide the background (white).
+        // We do NOT attempt to extract a representative color from thin strokes because
+        // that produces wrong tints (deep-blue on Apktool M, dark tints on Google icons).
+        final float transparentFraction = (float) transparentScore / totalPixels;
+        if (transparentFraction > TRANSPARENT_BACKGROUND_THRESHOLD) {
+            out.isMostlyTransparent = true;
             out.backgroundColor = DEFAULT_WRAPPER_BACKGROUND;
             out.aWidth     = aWidth;
             out.aHeight    = aHeight;
@@ -746,6 +767,9 @@ public class BaseIconFactory implements AutoCloseable {
         float   aHeight    = 0f;
         int     iconWidth  = 0;
         int     iconHeight = 0;
+        // Normalized translation offsets to center the visible bounding box in the mask viewport.
+        float   offsetX    = 0f;
+        float   offsetY    = 0f;
     }
 
     // -----------------------------------------------------------------------
@@ -822,24 +846,20 @@ public class BaseIconFactory implements AutoCloseable {
                 foreground.setDrawable(icon);
 
                 if (analysis.isFullBleed || analysis.noMixinNeeded) {
+                    foreground.setOffset(analysis.offsetX, analysis.offsetY);
+                    float baseScale = analysis.noMixinNeeded
+                            ? NO_MIXIN_ICON_SCALE
+                            : FULL_BLEED_ICON_SCALE;
                     if (analysis.aWidth > 0 && analysis.aHeight > 0
                             && analysis.iconWidth > 0 && analysis.iconHeight > 0) {
-                        float upScale;
-                        if (analysis.noMixinNeeded) {
-                            upScale = Math.min(
-                                    analysis.iconWidth  / analysis.aWidth,
-                                    analysis.iconHeight / analysis.aHeight);
-                            foreground.setScale(NO_MIXIN_ICON_SCALE * upScale);
-                        } else {
-                            upScale = Math.max(
-                                    analysis.iconWidth  / analysis.aWidth,
-                                    analysis.iconHeight / analysis.aHeight);
-                            foreground.setScale(FULL_BLEED_ICON_SCALE * upScale);
-                        }
+                        // Scale by max(iconW, iconH) / min(aW, aH) so the narrower visible
+                        // dimension fully covers the mask viewport even after FixedScaleDrawable's
+                        // aspect-ratio normalization.
+                        float upScale = Math.max(analysis.iconWidth, analysis.iconHeight)
+                                / Math.min(analysis.aWidth, analysis.aHeight);
+                        foreground.setScale(baseScale * upScale);
                     } else {
-                        foreground.setScale(analysis.noMixinNeeded
-                                ? NO_MIXIN_ICON_SCALE
-                                : FULL_BLEED_ICON_SCALE);
+                        foreground.setScale(baseScale);
                     }
                 } else {
                     foreground.setScale(analysis.normalizerScale);
