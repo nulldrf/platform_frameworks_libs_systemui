@@ -153,7 +153,14 @@ fun getMonochromeBackgroundColor(context: Context): Int {
  */
 fun getWrapperBackgroundColor(context: Context, icon: Drawable): Int {
     val lightness = context.prefs.getFloat("pref_coloredBackgroundLightness", 1f)
-    val palette = Palette.Builder(drawableToBitmap(icon)).generate()
+    val bitmap = drawableToBitmap(icon)
+    val palette = try {
+        Palette.Builder(bitmap).generate()
+    } finally {
+        if (icon !is BitmapDrawable) {
+            bitmap.recycle()
+        }
+    }
     val dominantColor = palette.getDominantColor(DEFAULT_WRAPPER_BACKGROUND)
     return setLightness(dominantColor, lightness)
 }
